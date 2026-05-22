@@ -1,0 +1,1221 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Livia · AI Executive Assistant</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Cinzel:wght@400;500;600&family=Cormorant+Garamond:ital,wght@0,300;0,400;0,500;1,300;1,400&family=Inter:wght@300;400;500&display=swap" rel="stylesheet">
+  <style>
+    *, *::before, *::after { box-sizing:border-box; margin:0; padding:0; }
+
+    /* ── Design tokens ─────────────────────────────────────────────── */
+    :root {
+      /* Palette — warm parchment + deep charcoal + imperial gold */
+      --parch:      #f4efe6;      /* main background — aged vellum */
+      --parch-lt:   #faf7f1;      /* surface — lighter leaf */
+      --parch-md:   #ede6d8;      /* mid-tone border zone */
+      --ink:        #1a1612;      /* near-black — iron gall ink */
+      --ink-mid:    #4a4440;      /* mid-tone text */
+      --ink-soft:   #9c948c;      /* quiet labels */
+      --ink-ghost:  #c8c0b6;      /* disabled / faint */
+      --gold:       #a87c3e;      /* imperial gold */
+      --gold-lt:    #c99a56;      /* lighter gold for headings */
+      --gold-pale:  #a87c3e14;    /* gold wash */
+      --crimson:    #7a1f1f;      /* Roman crimson — danger */
+      --crimson-bg: #7a1f1f0e;
+      --laurel:     #2d5a3d;      /* laurel green — success */
+      --laurel-bg:  #2d5a3d0e;
+      --cobalt:     #1e3a6e;      /* deep cobalt — info */
+      --cobalt-bg:  #1e3a6e0e;
+      --violet:     #4c2b8a;      /* imperial purple — draft */
+      --violet-bg:  #4c2b8a0e;
+      --border:     #ddd5c5;
+      --border-lt:  #ece6da;
+      --shadow-sm:  0 1px 3px rgba(26,22,18,.07), 0 1px 2px rgba(26,22,18,.05);
+      --shadow:     0 2px 8px rgba(26,22,18,.09), 0 1px 3px rgba(26,22,18,.06);
+      --shadow-lg:  0 8px 32px rgba(26,22,18,.13), 0 2px 8px rgba(26,22,18,.08);
+      --radius:     1px;  /* near-square — classical proportions */
+      --imperial:   #5a1a3a;      /* Tyrian purple */
+    }
+
+    /* ── Base ──────────────────────────────────────────────────────── */
+    body {
+      font-family:'Inter',sans-serif; background:var(--parch); color:var(--ink);
+      font-size:14px; line-height:1.55; min-height:100vh;
+      /* Subtle marble texture via repeating gradient */
+      background-image:
+        radial-gradient(ellipse at 20% 50%, rgba(168,124,62,.03) 0%, transparent 50%),
+        radial-gradient(ellipse at 80% 20%, rgba(168,124,62,.02) 0%, transparent 40%),
+        radial-gradient(ellipse at 50% 80%, rgba(90,26,58,.02) 0%, transparent 45%);
+    }
+
+    /* ── Scrollbar ── */
+    ::-webkit-scrollbar { width:5px; height:5px; }
+    ::-webkit-scrollbar-track { background:transparent; }
+    ::-webkit-scrollbar-thumb { background:var(--border); border-radius:3px; }
+
+    /* ── Login overlay ─────────────────────────────────────────────── */
+    #login-overlay {
+      display:none; position:fixed; inset:0; z-index:2000;
+      background: var(--parch);
+      background-image:
+        radial-gradient(ellipse at 50% 30%, rgba(168,124,62,.06) 0%, transparent 50%),
+        radial-gradient(ellipse at 30% 70%, rgba(90,26,58,.03) 0%, transparent 40%);
+      align-items:center; justify-content:center;
+    }
+    #login-overlay.visible { display:flex; }
+    .login-wrap { width:380px; text-align:center; }
+    .login-laurel { font-family:'Cinzel',serif; font-size:14px; letter-spacing:0.6em; color:var(--gold); margin-bottom:24px; opacity:.5; }
+    .login-box {
+      background:var(--parch-lt); border:1px solid var(--border);
+      box-shadow:var(--shadow-lg); padding:56px 48px 48px;
+      position:relative;
+    }
+    /* Corner ornaments on login box */
+    .login-box::before, .login-box::after {
+      content:''; position:absolute; width:20px; height:20px;
+      border-color:var(--gold); border-style:solid; opacity:.3;
+    }
+    .login-box::before { top:10px; left:10px; border-width:1px 0 0 1px; }
+    .login-box::after  { bottom:10px; right:10px; border-width:0 1px 1px 0; }
+    .login-box h2 { font-family:'Cinzel',serif; font-size:34px; font-weight:500; color:var(--gold); letter-spacing:0.14em; margin-bottom:4px; }
+    .login-box p  { font-size:9px; color:var(--ink-soft); letter-spacing:0.3em; text-transform:uppercase; margin-bottom:36px; }
+    .login-divider { width:60px; height:1px; background:linear-gradient(90deg,transparent,var(--gold),transparent); margin:0 auto 32px; }
+    .login-error { color:var(--crimson); font-size:11px; margin-top:10px; min-height:16px; }
+
+    /* ── Header ────────────────────────────────────────────────────── */
+    header {
+      background: linear-gradient(180deg, #1e1a15 0%, var(--ink) 100%);
+      padding:0 52px;
+      height:72px;
+      display:flex;
+      align-items:center;
+      justify-content:space-between;
+      position:sticky;
+      top:0;
+      z-index:200;
+      border-bottom:1px solid #2e2820;
+    }
+    /* Imperial gold band — top of header */
+    header::before {
+      content:'';
+      position:absolute;
+      top:0; left:0; right:0;
+      height:3px;
+      background: linear-gradient(90deg,
+        transparent 0%, var(--gold) 10%, var(--gold-lt) 25%,
+        var(--gold) 40%, var(--gold-lt) 50%,
+        var(--gold) 60%, var(--gold-lt) 75%, var(--gold) 90%, transparent 100%);
+      opacity:.7;
+    }
+    /* Greek key / meander pattern band — bottom of header */
+    header::after {
+      content:'';
+      position:absolute;
+      bottom:0; left:0; right:0;
+      height:1px;
+      background: repeating-linear-gradient(90deg,
+        var(--gold) 0px, var(--gold) 8px,
+        transparent 8px, transparent 12px,
+        var(--gold) 12px, var(--gold) 14px,
+        transparent 14px, transparent 18px);
+      opacity:.25;
+    }
+    .h-brand { display:flex; align-items:center; gap:16px; }
+    .h-monogram {
+      width:40px; height:40px;
+      border:1.5px solid var(--gold);
+      display:flex; align-items:center; justify-content:center;
+      font-family:'Cinzel',serif; font-size:17px; font-weight:600;
+      color:var(--gold); letter-spacing:0.05em;
+      flex-shrink:0;
+      position:relative;
+    }
+    /* Corner ornaments on monogram */
+    .h-monogram::before, .h-monogram::after {
+      content:''; position:absolute; width:6px; height:6px;
+      border-color:var(--gold); border-style:solid; opacity:.5;
+    }
+    .h-monogram::before { top:-2px; left:-2px; border-width:1px 0 0 1px; }
+    .h-monogram::after  { bottom:-2px; right:-2px; border-width:0 1px 1px 0; }
+    .h-title { font-family:'Cinzel',serif; font-size:21px; font-weight:500; color:var(--gold-lt); letter-spacing:0.16em; }
+    .h-sub   { font-size:9px; color:#6b6258; letter-spacing:0.28em; text-transform:uppercase; margin-top:3px; }
+    .h-right { display:flex; align-items:center; gap:20px; }
+    .status-pill { display:flex; align-items:center; gap:8px; font-size:11px; color:#6b6258; letter-spacing:0.05em; }
+    .sdot { width:7px; height:7px; border-radius:50%; background:#6b6258; flex-shrink:0; transition:background .3s; }
+    .sdot.on   { background:#5cb87e; animation:glow 3s ease-in-out infinite; }
+    .sdot.warn { background:#e0a840; }
+    @keyframes glow { 0%,100%{box-shadow:0 0 0 0 #5cb87e50} 50%{box-shadow:0 0 0 4px #5cb87e20} }
+
+    /* ── Outside-hours banner ──────────────────────────────────────── */
+    .hours-banner { background:#231e19; color:#d4a44c; font-family:'Cinzel',serif; font-size:10px; letter-spacing:0.22em; text-transform:uppercase; padding:8px 52px; text-align:center; display:none; border-bottom:1px solid #2e2820; }
+
+    /* ── Nav ───────────────────────────────────────────────────────── */
+    nav {
+      background:var(--parch-lt);
+      border-bottom:1px solid var(--border);
+      padding:0 52px;
+      display:flex;
+      gap:0;
+      overflow-x:auto;
+    }
+    nav button {
+      background:none; border:none; border-bottom:2px solid transparent;
+      padding:15px 20px; font-family:'Inter',sans-serif; font-size:11px;
+      font-weight:500; letter-spacing:0.06em; text-transform:uppercase;
+      color:var(--ink-soft); cursor:pointer; white-space:nowrap;
+      transition:color .2s, border-color .2s;
+    }
+    nav button:hover  { color:var(--ink-mid); }
+    nav button.active { color:var(--gold); border-bottom-color:var(--gold); font-weight:600; }
+    .nbadge { display:inline-flex; align-items:center; justify-content:center; background:var(--gold); color:#fff; font-size:9px; font-weight:600; min-width:17px; height:17px; border-radius:99px; padding:0 4px; margin-left:5px; vertical-align:middle; }
+    .nbadge.zero { background:var(--ink-ghost); }
+
+    /* ── Main ──────────────────────────────────────────────────────── */
+    main { max-width:1080px; margin:0 auto; padding:40px 52px 72px; }
+    .tab-panel        { display:none; }
+    .tab-panel.active { display:block; }
+
+    /* ── Section header ── */
+    .sect-head { margin-bottom:32px; }
+    .sect-head h2 { font-family:'Cinzel',serif; font-size:26px; font-weight:500; color:var(--ink); letter-spacing:0.1em; margin-bottom:4px; }
+    .sect-head p  { font-size:12px; color:var(--ink-soft); font-style:italic; }
+    .sect-rule {
+      height:1px; margin-bottom:28px; opacity:.6;
+      background:
+        linear-gradient(90deg, transparent 0%, var(--gold) 5%, var(--gold-lt) 15%, var(--gold) 30%, var(--border) 60%, transparent 100%);
+    }
+
+    /* ── Divider label ── */
+    .divlabel { font-size:9px; font-weight:600; letter-spacing:0.22em; text-transform:uppercase; color:var(--gold); margin-bottom:12px; padding-bottom:8px; border-bottom:1px solid var(--border-lt); display:flex; align-items:center; gap:10px; }
+    .divlabel::after { content:''; flex:1; height:1px; background:var(--border-lt); }
+
+    /* ── Buttons ───────────────────────────────────────────────────── */
+    .btn {
+      font-family:'Inter',sans-serif; font-size:11px; font-weight:500;
+      letter-spacing:0.05em; text-transform:uppercase;
+      padding:9px 22px; border:1px solid var(--border);
+      background:var(--parch-lt); color:var(--ink-mid);
+      cursor:pointer; border-radius:var(--radius);
+      transition:all .18s; display:inline-flex; align-items:center;
+      gap:6px; white-space:nowrap; text-decoration:none;
+    }
+    .btn:hover    { background:var(--ink); color:var(--parch); border-color:var(--ink); }
+    .btn:disabled { opacity:.35; cursor:not-allowed; pointer-events:none; }
+    .btn-gold  { background:linear-gradient(180deg, var(--gold-lt) 0%, var(--gold) 100%); color:#fff; border-color:var(--gold); text-shadow:0 1px 1px rgba(0,0,0,.15); }
+    .btn-gold:hover { background:linear-gradient(180deg, #d4a85e 0%, var(--gold-lt) 100%); border-color:var(--gold-lt); color:#fff; }
+    .btn-danger { border-color:#d4908a; color:var(--crimson); }
+    .btn-danger:hover { background:var(--crimson); color:#fff; border-color:var(--crimson); }
+    .btn-ghost  { background:transparent; border-color:transparent; color:var(--ink-soft); }
+    .btn-ghost:hover { background:var(--parch-md); border-color:var(--border); color:var(--ink); }
+    .btn-sm { padding:5px 14px; font-size:10px; }
+    .btn-xs { padding:3px 9px; font-size:9px; }
+
+    /* ── Alert ─────────────────────────────────────────────────────── */
+    .alert { padding:12px 18px; border:1px solid; font-size:12px; margin-bottom:18px; border-radius:var(--radius); }
+    .alert-warn { border-color:#d4a44c; background:#d4a44c0c; color:#7a4a10; }
+    .alert-ok   { border-color:var(--laurel); background:var(--laurel-bg); color:var(--laurel); }
+
+    /* ── Cards ─────────────────────────────────────────────────────── */
+    .card {
+      background:var(--parch-lt); border:1px solid var(--border);
+      border-radius:var(--radius); box-shadow:var(--shadow-sm);
+      padding:28px 32px; margin-bottom:20px;
+      position:relative;
+    }
+    .card-title { font-family:'Cormorant Garamond',serif; font-size:21px; font-weight:400; color:var(--ink); margin-bottom:20px; padding-bottom:14px; border-bottom:1px solid var(--border-lt); letter-spacing:0.02em; }
+    .card-sm { padding:18px 22px; }
+
+    /* ── Stat grid ─────────────────────────────────────────────────── */
+    .stat-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(170px,1fr)); gap:16px; margin-bottom:28px; }
+    .stat-card {
+      background:var(--parch-lt); border:1px solid var(--border);
+      border-radius:var(--radius); padding:22px 24px; box-shadow:var(--shadow-sm);
+      position:relative; overflow:hidden;
+    }
+    .stat-card::before {
+      content:''; position:absolute; top:0; left:0; right:0; height:3px;
+      background:linear-gradient(90deg,var(--gold),var(--gold-lt),var(--gold),transparent);
+      opacity:.6;
+    }
+    /* Faint laurel watermark in stat cards */
+    .stat-card::after {
+      content:''; position:absolute; bottom:-8px; right:-4px;
+      width:60px; height:60px; opacity:.04;
+      background:radial-gradient(circle, var(--gold) 0%, transparent 70%);
+      border-radius:50%;
+    }
+    .sc-label { font-size:9px; font-weight:600; letter-spacing:0.22em; text-transform:uppercase; color:var(--ink-soft); margin-bottom:8px; }
+    .sc-value { font-family:'Cinzel',serif; font-size:34px; font-weight:400; color:var(--gold); line-height:1; margin-bottom:4px; letter-spacing:0.02em; }
+    .sc-sub   { font-size:11px; color:var(--ink-ghost); }
+
+    /* ── Forms ─────────────────────────────────────────────────────── */
+    .fgrid  { display:grid; grid-template-columns:1fr 1fr; gap:16px; }
+    .fgrid3 { display:grid; grid-template-columns:1fr 1fr 1fr; gap:16px; }
+    .ffull  { grid-column:1/-1; }
+    .field  { display:flex; flex-direction:column; gap:5px; }
+    .field label { font-size:10px; font-weight:500; letter-spacing:0.1em; text-transform:uppercase; color:var(--ink-soft); }
+    input[type=text],input[type=email],input[type=number],input[type=date],input[type=password],textarea,select {
+      width:100%; font-family:'Inter',sans-serif; font-size:13px;
+      padding:9px 12px; background:var(--parch); border:1px solid var(--border);
+      color:var(--ink); border-radius:var(--radius); outline:none; transition:border-color .15s, background .15s;
+    }
+    input:focus,textarea:focus,select:focus { border-color:var(--gold); background:var(--parch-lt); }
+    textarea { resize:vertical; min-height:90px; line-height:1.65; }
+    select { cursor:pointer; appearance:none; background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M0 0l5 6 5-6z' fill='%239c948c'/%3E%3C/svg%3E"); background-repeat:no-repeat; background-position:right 12px center; padding-right:30px; }
+    .save-row { display:flex; align-items:center; gap:12px; padding-top:18px; margin-top:18px; border-top:1px solid var(--border-lt); }
+    .save-msg { font-size:11px; color:var(--laurel); opacity:0; transition:opacity .3s; }
+    .save-msg.show { opacity:1; }
+    .toolbar { display:flex; gap:10px; align-items:center; flex-wrap:wrap; margin-bottom:20px; }
+    .toolbar input { flex:1; min-width:180px; }
+
+    /* ── Filter chips ──────────────────────────────────────────────── */
+    .chips { display:flex; gap:6px; flex-wrap:wrap; margin-bottom:20px; }
+    .chip {
+      font-size:10px; font-weight:500; letter-spacing:0.08em; text-transform:uppercase;
+      padding:5px 14px; border:1px solid var(--border); background:transparent;
+      color:var(--ink-soft); cursor:pointer; border-radius:99px; transition:all .15s;
+    }
+    .chip:hover, .chip.on { background:var(--gold); color:#fff; border-color:var(--gold); }
+
+    /* ── Thread cards ──────────────────────────────────────────────── */
+    .thread-list { display:flex; flex-direction:column; gap:10px; }
+    .tc {
+      background:var(--parch-lt); border:1px solid var(--border);
+      border-left:3px solid var(--gold); border-radius:var(--radius);
+      padding:18px 22px; box-shadow:var(--shadow-sm);
+      transition:box-shadow .15s;
+    }
+    .tc:hover { box-shadow:var(--shadow); }
+    .tc.done      { border-left-color:var(--laurel); opacity:.6; }
+    .tc.cancelled { border-left-color:var(--ink-ghost); opacity:.4; }
+    .tc.booking   { border-left-color:var(--cobalt); }
+    .tc.draft     { border-left-color:var(--violet); }
+    .tc.travel    { border-left-color:var(--gold); background:var(--gold-pale); }
+    .tc-name  { font-family:'Cormorant Garamond',serif; font-size:21px; font-weight:400; margin-bottom:2px; letter-spacing:0.01em; }
+    .tc-meta  { font-size:12px; color:var(--ink-mid); }
+    .tc-badge {
+      display:inline-flex; align-items:center; gap:5px;
+      font-size:10px; font-weight:500; letter-spacing:0.05em;
+      margin-top:9px; padding:3px 11px; border-radius:99px;
+    }
+    .b-await  { background:#fef3c7; color:#7a4a10; }
+    .b-conf   { background:var(--cobalt-bg); color:var(--cobalt); }
+    .b-gius   { background:var(--gold-pale); color:var(--gold); }
+    .b-book   { background:var(--cobalt-bg); color:var(--cobalt); }
+    .b-done   { background:var(--laurel-bg); color:var(--laurel); }
+    .b-canc   { background:var(--border-lt); color:var(--ink-ghost); }
+    .b-draft  { background:var(--violet-bg); color:var(--violet); }
+    .tc-detail { font-size:12px; color:var(--ink-soft); margin-top:6px; }
+    .tc-last   { font-size:11px; color:var(--ink-ghost); margin-top:4px; font-style:italic; }
+
+    /* ── CRM grid ──────────────────────────────────────────────────── */
+    .crm-subtabs { display:flex; border-bottom:1px solid var(--border); margin-bottom:24px; }
+    .cstab { background:none; border:none; border-bottom:2px solid transparent; padding:10px 18px; font-family:'Inter',sans-serif; font-size:11px; font-weight:500; letter-spacing:0.06em; text-transform:uppercase; color:var(--ink-soft); cursor:pointer; transition:color .15s; }
+    .cstab.on { color:var(--gold); border-bottom-color:var(--gold); }
+    .crm-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(240px,1fr)); gap:14px; }
+    .p-card {
+      background:var(--parch-lt); border:1px solid var(--border);
+      border-top:3px solid var(--ink-ghost); border-radius:var(--radius);
+      padding:18px 20px; cursor:pointer; box-shadow:var(--shadow-sm);
+      transition:box-shadow .15s, transform .15s;
+    }
+    .p-card:hover { box-shadow:var(--shadow); transform:translateY(-1px); }
+    .p-card.ri { border-top-color:#1e3a6e; }
+    .p-card.ra { border-top-color:#4c2b8a; }
+    .p-card.rl { border-top-color:#1d4ed8; }
+    .p-card.rac{ border-top-color:#0369a1; }
+    .p-card.rb { border-top-color:#0891b2; }
+    .p-card.rp { border-top-color:var(--gold); }
+    .p-card.rv { border-top-color:var(--crimson); }
+    .p-card.rc { border-top-color:#b45309; }
+    .p-card.rf { border-top-color:var(--laurel); }
+    .p-card.rfam{ border-top-color:#be185d; }
+    .p-name  { font-family:'Cormorant Garamond',serif; font-size:20px; font-weight:400; margin-bottom:2px; }
+    .p-email { font-size:11px; color:var(--ink-soft); margin-bottom:8px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+    .p-tags  { display:flex; gap:4px; flex-wrap:wrap; margin-bottom:8px; }
+    .p-tag   { font-size:9px; letter-spacing:0.07em; text-transform:uppercase; padding:2px 7px; border:1px solid var(--border); color:var(--ink-mid); border-radius:2px; }
+    .p-tag.rel { background:var(--ink); color:var(--parch); border-color:var(--ink); }
+    .p-stats { font-size:11px; color:var(--ink-soft); display:flex; gap:12px; }
+    .p-open  { font-size:11px; color:#b45309; margin-top:6px; }
+    .addr-row { background:var(--parch-lt); border:1px solid var(--border); border-radius:var(--radius); display:flex; align-items:center; gap:14px; padding:12px 18px; box-shadow:var(--shadow-sm); }
+    .ar-name { font-family:'Cormorant Garamond',serif; font-size:17px; flex:0 0 190px; }
+    .ar-email{ font-size:12px; color:var(--ink-mid); flex:1; }
+    .ar-date { font-size:11px; color:var(--ink-ghost); flex:0 0 80px; text-align:right; }
+
+    /* ── Profile modal ─────────────────────────────────────────────── */
+    #profile-modal { display:none; position:fixed; inset:0; background:rgba(26,22,18,.7); z-index:600; align-items:center; justify-content:center; padding:20px; backdrop-filter:blur(3px); }
+    #profile-modal.visible { display:flex; }
+    .modal-box {
+      background:var(--parch-lt); border:1px solid var(--border);
+      border-radius:var(--radius); width:100%; max-width:660px;
+      max-height:88vh; overflow-y:auto; padding:44px 48px;
+      position:relative; box-shadow:var(--shadow-lg);
+    }
+    /* Corner ornaments on modal */
+    .modal-box::before, .modal-box::after {
+      content:''; position:absolute; width:16px; height:16px;
+      border-color:var(--gold); border-style:solid; opacity:.25; pointer-events:none;
+    }
+    .modal-box::before { top:12px; left:12px; border-width:1px 0 0 1px; }
+    .modal-box::after  { bottom:12px; right:12px; border-width:0 1px 1px 0; }
+    .modal-close { position:absolute; top:14px; right:16px; background:none; border:none; font-size:18px; cursor:pointer; color:var(--ink-soft); width:34px; height:34px; display:flex; align-items:center; justify-content:center; border-radius:2px; transition:background .15s; z-index:1; }
+    .modal-close:hover { background:var(--parch-md); color:var(--ink); }
+    .modal-ornament { font-family:'Cinzel',serif; font-size:10px; letter-spacing:0.6em; color:var(--gold); text-align:center; margin-bottom:6px; opacity:.4; }
+    .modal-name  { font-family:'Cinzel',serif; font-size:28px; font-weight:500; color:var(--gold); margin-bottom:4px; letter-spacing:0.08em; }
+    .modal-email { font-size:12px; color:var(--ink-soft); margin-bottom:28px; letter-spacing:0.02em; }
+    .msec { margin-bottom:24px; }
+    .msec-title { font-size:9px; font-weight:600; letter-spacing:0.22em; text-transform:uppercase; color:var(--gold); margin-bottom:10px; padding-bottom:7px; border-bottom:1px solid var(--border-lt); }
+    .mfield { display:flex; gap:10px; align-items:flex-start; padding:7px 0; border-bottom:1px solid var(--border-lt); font-size:13px; }
+    .mfield:last-child { border-bottom:none; }
+    .mfl { color:var(--ink-soft); flex:0 0 110px; font-size:12px; padding-top:10px; }
+    .mfv { flex:1; }
+    .irow { padding:8px 0; border-bottom:1px solid var(--border-lt); }
+    .irow:last-child { border-bottom:none; }
+    .imeta { font-size:11px; color:var(--ink-soft); margin-bottom:2px; }
+    .open-item { padding:5px 0; font-size:12px; color:#b45309; border-bottom:1px solid var(--border-lt); }
+    .open-item:last-child { border-bottom:none; }
+
+
+    /* ── Expenses ──────────────────────────────────────────────────── */
+    .etabs { display:flex; border-bottom:1px solid var(--border); margin-bottom:22px; }
+    .etab { background:none; border:none; border-bottom:2px solid transparent; padding:10px 18px; font-family:'Inter',sans-serif; font-size:11px; font-weight:500; letter-spacing:0.06em; text-transform:uppercase; color:var(--ink-soft); cursor:pointer; transition:color .15s; }
+    .etab.on { color:var(--gold); border-bottom-color:var(--gold); }
+    .exp-table { width:100%; border-collapse:collapse; font-size:13px; }
+    .exp-table thead tr { background:var(--ink); color:var(--parch); }
+    .exp-table th { padding:10px 14px; text-align:left; font-size:9px; font-weight:600; letter-spacing:0.14em; text-transform:uppercase; }
+    .exp-table td { padding:10px 14px; border-bottom:1px solid var(--border-lt); vertical-align:middle; }
+    .exp-table tr:hover td { background:var(--gold-pale); }
+    .type-pill { display:inline-block; font-size:9px; font-weight:600; letter-spacing:0.08em; text-transform:uppercase; padding:2px 9px; border-radius:99px; }
+
+    /* Expense modal */
+    .emod-wrap { display:none; position:fixed; inset:0; background:rgba(26,22,18,.7); z-index:999; align-items:center; justify-content:center; backdrop-filter:blur(3px); }
+    .emod-wrap.open { display:flex; }
+    .emod { background:var(--parch-lt); border:1px solid var(--border); border-radius:var(--radius); padding:32px 38px; width:520px; max-width:95vw; max-height:90vh; overflow-y:auto; box-shadow:var(--shadow-lg); }
+    .emod-title { font-family:'Cormorant Garamond',serif; font-size:24px; font-weight:400; margin-bottom:20px; padding-bottom:12px; border-bottom:1px solid var(--border-lt); }
+
+    /* ── Settings ──────────────────────────────────────────────────── */
+    .settings-status { background:var(--parch-lt); border:1px solid var(--border); border-radius:var(--radius); overflow:hidden; margin-bottom:22px; }
+    .srow { display:flex; justify-content:space-between; align-items:center; padding:13px 20px; border-bottom:1px solid var(--border-lt); font-size:13px; }
+    .srow:last-child { border-bottom:none; }
+    .srow-lbl { color:var(--ink-mid); }
+    .srow-val.ok   { color:var(--laurel); font-weight:500; }
+    .srow-val.bad  { color:var(--crimson); }
+    .srow-val.warn { color:#b45309; }
+
+    /* ── Empty state ───────────────────────────────────────────────── */
+    .empty { text-align:center; padding:72px 0; color:var(--ink-ghost); }
+    .empty-glyph { font-family:'Cinzel',serif; font-size:36px; letter-spacing:0.3em; margin-bottom:12px; opacity:.2; display:block; }
+    .empty p { font-size:10px; letter-spacing:0.22em; text-transform:uppercase; font-family:'Cinzel',serif; }
+
+    /* ── Responsive ────────────────────────────────────────────────── */
+    @media(max-width:720px) {
+      main { padding:24px 20px 56px; }
+      header, nav, .hours-banner { padding-left:20px; padding-right:20px; }
+      .fgrid,.fgrid3 { grid-template-columns:1fr; }
+      .ffull { grid-column:1; }
+      .crm-grid { grid-template-columns:1fr; }
+      .stat-grid { grid-template-columns:1fr 1fr; }
+      .h-sub { display:none; }
+    }
+  </style>
+</head>
+<body>
+
+<!-- ═══════════════════════ LOGIN ════════════════════════════════════ -->
+<div id="login-overlay">
+  <div class="login-wrap">
+    <div class="login-laurel">SPQR</div>
+    <div class="login-box">
+      <h2 id="login-brand">Livia</h2>
+      <p id="login-org">AI Executive Assistant</p>
+      <div class="login-divider"></div>
+      <input type="password" id="login-password" placeholder="Enter password" onkeydown="if(event.key==='Enter')doLogin()" style="text-align:center;letter-spacing:0.12em;margin-bottom:14px;"/>
+      <button class="btn btn-gold" style="width:100%;justify-content:center;" onclick="doLogin()">Enter</button>
+      <div class="login-error" id="login-error"></div>
+    </div>
+  </div>
+</div>
+
+<!-- ═══════════════════════ HEADER ══════════════════════════════════ -->
+<header>
+  <div class="h-brand">
+    <div class="h-monogram">L</div>
+    <div>
+      <div class="h-title" id="brand-title">Livia</div>
+      <div class="h-sub" id="brand-sub">Executive Assistant</div>
+    </div>
+  </div>
+  <div class="h-right">
+    <div class="status-pill">
+      <div class="sdot" id="status-dot"></div>
+      <span id="status-text">Loading…</span>
+    </div>
+  </div>
+</header>
+<div class="hours-banner" id="hours-banner">🌙 Outside active hours (09:00–22:00) — Livia is in read-only mode</div>
+
+<!-- ═══════════════════════ NAV ═════════════════════════════════════ -->
+<nav>
+  <button class="active" onclick="showTab('dashboard',this)">Overview</button>
+  <button onclick="showTab('threads',this)">Threads <span class="nbadge zero" id="threads-badge">0</span></button>
+  <button onclick="showTab('crm',this)">CRM <span class="nbadge zero" id="crm-badge">0</span></button>
+  <button onclick="showTab('expenses',this)">Expenses <span class="nbadge zero" id="expenses-badge">0</span></button>
+</nav>
+
+<main>
+
+<!-- ═══════════════════════════════════════════════ OVERVIEW ════════ -->
+<div class="tab-panel active" id="tab-dashboard">
+  <div id="auth-alert"></div>
+  <div class="sect-head">
+    <h2 id="dash-greeting">Welcome</h2>
+    <p id="dash-date" style="font-size:12px;color:var(--ink-soft);"></p>
+  </div>
+  <div class="sect-rule"></div>
+
+  <!-- Stat cards -->
+  <div class="stat-grid">
+    <div class="stat-card">
+      <div class="sc-label">Emails Processed</div>
+      <div class="sc-value" id="ds-processed">—</div>
+    </div>
+    <div class="stat-card">
+      <div class="sc-label">Active Threads</div>
+      <div class="sc-value" id="ds-threads">—</div>
+    </div>
+    <div class="stat-card">
+      <div class="sc-label">Contacts in CRM</div>
+      <div class="sc-value" id="ds-profiles">—</div>
+    </div>
+    <div class="stat-card">
+      <div class="sc-label">Expenses Logged</div>
+      <div class="sc-value" id="ds-expenses">—</div>
+    </div>
+  </div>
+
+  <!-- Actions -->
+  <div class="card card-sm" style="margin-bottom:0;">
+    <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center;">
+      <span style="font-size:10px;letter-spacing:0.12em;text-transform:uppercase;color:var(--ink-soft);flex-shrink:0;">Actions</span>
+      <button class="btn btn-gold" onclick="sendBriefingNow()">☀ Send Morning Brief</button>
+      <button class="btn" onclick="pollNow()" id="btn-now">Fetch Emails Now</button>
+    </div>
+  </div>
+</div>
+
+<!-- ═══════════════════════════════════════════════ THREADS ═════════ -->
+<div class="tab-panel" id="tab-threads">
+  <div class="sect-head">
+    <h2>Threads</h2>
+    <p>Active correspondence managed by Livia on your behalf</p>
+  </div>
+  <div class="sect-rule"></div>
+  <div class="chips" style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+    <button class="chip on" onclick="setFilter('active',this)">Active</button>
+    <button class="chip"    onclick="setFilter('all',this)">All</button>
+    <button class="chip"    onclick="setFilter('done',this)">Completed</button>
+    <button class="btn btn-danger btn-sm" style="margin-left:auto;font-size:10px;" onclick="clearDoneThreads()">Clear Completed</button>
+  </div>
+  <div id="threads-list" class="thread-list">
+    <div class="empty"><span class="empty-glyph">SPQR</span><p>No threads yet</p></div>
+  </div>
+</div>
+
+<!-- ═══════════════════════════════════════════════ CRM ═════════════ -->
+<div class="tab-panel" id="tab-crm">
+  <div class="sect-head">
+    <h2>CRM</h2>
+    <p>Everyone Livia corresponds with on your behalf</p>
+  </div>
+  <div class="sect-rule"></div>
+
+  <div class="crm-subtabs">
+    <button class="cstab on" id="cstab-profiles" onclick="showCRMTab('profiles')">Profiles</button>
+    <button class="cstab"    id="cstab-address"  onclick="showCRMTab('address')">Address Book</button>
+    <button class="cstab"    id="cstab-add"      onclick="showCRMTab('add')">+ Add Contact</button>
+  </div>
+
+  <!-- Profiles -->
+  <div id="crm-panel-profiles">
+    <div class="toolbar">
+      <input type="text" id="crm-search" placeholder="Search name, company, role…" oninput="renderProfiles()"/>
+      <select id="crm-filter-rel" onchange="renderProfiles()" style="width:170px;flex-shrink:0;">
+        <option value="">All relationships</option>
+        <option value="investor">Investor</option><option value="advisor">Advisor</option>
+        <option value="lawyer">Lawyer</option><option value="accountant">Accountant</option>
+        <option value="banker">Banker</option><option value="partner">Partner</option>
+        <option value="vendor">Vendor</option><option value="client">Client</option>
+        <option value="friend">Friend</option><option value="family">Family</option>
+        <option value="journalist">Journalist</option><option value="government">Government</option>
+        <option value="other">Other</option>
+      </select>
+      <button class="btn btn-gold" id="btn-bootstrap" onclick="startBootstrap()">Build from Gmail</button>
+      <button class="btn" onclick="downloadCrmExcel()">Export Excel</button>
+      <button class="btn" onclick="downloadVcf()">Download .vcf</button>
+      <button class="btn" onclick="syncGoogleContacts()">Sync to iPhone</button>
+    </div>
+    <div class="alert alert-warn" id="bootstrap-bar" style="display:none;">Building CRM profiles from Gmail history — this may take a few minutes.</div>
+    <div class="divlabel">Contact Profiles <span id="crm-count" style="font-weight:300;letter-spacing:0;text-transform:none;color:var(--ink-soft);font-size:11px;margin-left:4px;"></span></div>
+    <div class="crm-grid" id="crm-grid">
+      <div class="empty" style="grid-column:1/-1"><span class="empty-glyph">✦</span><p>No profiles — click "Build from Gmail"</p></div>
+    </div>
+  </div>
+
+  <!-- Address book -->
+  <div id="crm-panel-address" style="display:none;">
+    <div class="divlabel">Known Contacts <span class="nbadge zero" id="contacts-badge2">0</span></div>
+    <div id="contacts-list" style="display:flex;flex-direction:column;gap:8px;"></div>
+  </div>
+
+  <!-- Add contact -->
+  <div id="crm-panel-add" style="display:none;">
+    <div class="card" style="max-width:500px;">
+      <div class="card-title">Add Contact</div>
+      <div class="fgrid">
+        <div class="field"><label>Name</label><input type="text" id="new-contact-name" placeholder="Jane Doe"/></div>
+        <div class="field"><label>Email</label><input type="email" id="new-contact-email" placeholder="name@example.com"/></div>
+      </div>
+      <div class="save-row">
+        <button class="btn btn-gold" onclick="addContact()">Save</button>
+        <span class="save-msg" id="contact-save-msg"></span>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Profile modal -->
+<div id="profile-modal">
+  <div class="modal-box">
+    <button class="modal-close" onclick="closeProfileModal()">✕</button>
+    <div class="modal-ornament">· · ·</div>
+    <div class="modal-name"  id="modal-name"></div>
+    <div class="modal-email" id="modal-email"></div>
+    <div class="msec">
+      <div class="msec-title">Details <span style="font-size:9px;color:var(--ink-soft);font-weight:400;letter-spacing:0;text-transform:none;">(click to edit)</span></div>
+      <div class="mfield"><span class="mfl">Name</span><span class="mfv"><input type="text" id="modal-name-input" onblur="saveProfileField('name',this.value)"/></span></div>
+      <div class="mfield"><span class="mfl">Company</span><span class="mfv"><input type="text" id="modal-company-input" onblur="saveProfileField('company',this.value)"/></span></div>
+      <div class="mfield"><span class="mfl">Role</span><span class="mfv"><input type="text" id="modal-role-input" onblur="saveProfileField('role',this.value)"/></span></div>
+      <div class="mfield"><span class="mfl">Phone</span><span class="mfv"><input type="text" id="modal-phone-input" onblur="saveProfileField('phone',this.value)" placeholder="Phone number"/></span></div>
+      <div class="mfield"><span class="mfl">Language</span><span class="mfv"><input type="text" id="modal-lang-input" onblur="saveProfileField('language',this.value)" placeholder="Italian, English…"/></span></div>
+      <div class="mfield"><span class="mfl">Relationship</span><span class="mfv">
+        <select id="modal-rel-select" onchange="saveProfileField('relationship',this.value)">
+          <option value="investor">Investor</option><option value="advisor">Advisor</option>
+          <option value="lawyer">Lawyer</option><option value="accountant">Accountant</option>
+          <option value="banker">Banker</option><option value="partner">Partner</option>
+          <option value="vendor">Vendor</option><option value="client">Client</option>
+          <option value="friend">Friend</option><option value="family">Family</option>
+          <option value="journalist">Journalist</option><option value="government">Government</option>
+          <option value="other">Other</option>
+        </select>
+      </span></div>
+      <div class="mfield"><span class="mfl">Tone</span><span class="mfv"><input type="text" id="modal-tone-input" onblur="saveProfileField('tone',this.value)" placeholder="formal, warm, concise…"/></span></div>
+      <div class="mfield"><span class="mfl">Last contact</span><span class="mfv" id="modal-last" style="padding-top:10px;font-size:13px;color:var(--ink-mid);"></span></div>
+      <div class="mfield"><span class="mfl">Total emails</span><span class="mfv" id="modal-total" style="padding-top:10px;font-size:13px;color:var(--ink-mid);"></span></div>
+      <div class="mfield"><span class="mfl">Notes</span><span class="mfv"><textarea id="modal-notes" style="min-height:60px;" onblur="saveProfileField('notes',this.value)" placeholder="Private notes…"></textarea></span></div>
+    </div>
+    <div class="msec">
+      <div class="msec-title">Aliases <span style="font-size:9px;color:var(--ink-soft);font-weight:400;letter-spacing:0;text-transform:none;">(merge email addresses)</span></div>
+      <div id="modal-aliases"></div>
+      <div style="display:flex;gap:8px;margin-top:8px;">
+        <input type="email" id="modal-alias-input" placeholder="other@email.com" style="flex:1;"/>
+        <button class="btn btn-sm" onclick="addAlias()">Add</button>
+      </div>
+    </div>
+    <div class="msec" id="modal-open-section">
+      <div class="msec-title">Open Items</div>
+      <div id="modal-open-items"></div>
+    </div>
+    <div class="msec">
+      <div class="msec-title">Interaction History</div>
+      <div id="modal-interactions"></div>
+    </div>
+    <div style="margin-top:20px;padding-top:14px;border-top:1px solid var(--border-lt);">
+      <button class="btn btn-danger btn-sm" onclick="deleteProfile()">Remove Profile</button>
+    </div>
+  </div>
+</div>
+
+
+</div>
+
+<!-- ═══════════════════════════════════════════════ EXPENSES ════════ -->
+<div class="tab-panel" id="tab-expenses">
+  <div class="sect-head">
+    <h2>Expenses</h2>
+    <p>Invoices and expenses captured from email, plus manual entries</p>
+  </div>
+  <div class="sect-rule"></div>
+
+  <div id="expense-summary-cards" class="stat-grid" style="margin-bottom:24px;"></div>
+
+  <div class="etabs">
+    <button class="etab on" id="etab-register" onclick="showExpenseTab('register')">Register</button>
+    <button class="etab"    id="etab-add"      onclick="showExpenseTab('add')">+ Add Entry</button>
+  </div>
+
+  <!-- Register -->
+  <div id="expense-panel-register">
+    <div class="toolbar">
+      <input type="text" id="expenses-search" placeholder="Search vendor, description, location…" oninput="renderExpenses()"/>
+      <select id="expenses-filter-type" onchange="renderExpenses()" style="width:150px;flex-shrink:0;">
+        <option value="">All types</option>
+        <option value="invoice">Invoice</option><option value="receipt">Receipt</option>
+        <option value="subscription">Subscription</option><option value="travel">Travel</option>
+        <option value="meal">Meal</option><option value="accommodation">Accommodation</option>
+        <option value="utilities">Utilities</option><option value="other">Other</option>
+      </select>
+      <button class="btn" onclick="refreshExpenses()">Refresh</button>
+      <button class="btn btn-gold" onclick="exportExpensesZip()">Export ZIP</button>
+    </div>
+    <div class="divlabel">Expense Register <span id="expenses-count" style="font-weight:300;letter-spacing:0;text-transform:none;color:var(--ink-soft);font-size:11px;margin-left:4px;"></span></div>
+    <div style="overflow-x:auto;">
+      <table class="exp-table">
+        <thead><tr>
+          <th>Date</th><th>Vendor</th><th style="text-align:right;">Amount</th>
+          <th>Type</th><th>Location</th><th>Description</th>
+          <th style="text-align:center;">Receipt</th><th></th>
+        </tr></thead>
+        <tbody id="expenses-tbody">
+          <tr><td colspan="8" style="text-align:center;padding:44px;color:var(--ink-ghost);">No expenses logged yet</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- Add -->
+  <div id="expense-panel-add" style="display:none;">
+    <div class="card" style="max-width:640px;">
+      <div class="card-title">Add Expense</div>
+      <div class="fgrid">
+        <div class="field"><label>Vendor / Payee *</label><input type="text" id="exp-vendor" placeholder="Alitalia, Marriott, AWS…"/></div>
+        <div class="field"><label>Date *</label><input type="date" id="exp-date"/></div>
+        <div class="field"><label>Amount *</label><input type="number" id="exp-amount" placeholder="0.00" step="0.01" min="0"/></div>
+        <div class="field"><label>Currency</label>
+          <select id="exp-currency"><option value="EUR">EUR €</option><option value="USD">USD $</option><option value="GBP">GBP £</option><option value="CHF">CHF</option><option value="JPY">JPY ¥</option><option value="AED">AED</option></select>
+        </div>
+        <div class="field"><label>Type</label>
+          <select id="exp-type"><option value="invoice">Invoice</option><option value="receipt">Receipt</option><option value="subscription">Subscription</option><option value="travel">Travel</option><option value="meal">Meal</option><option value="accommodation">Accommodation</option><option value="utilities">Utilities</option><option value="other">Other</option></select>
+        </div>
+        <div class="field"><label>Location</label><input type="text" id="exp-location" placeholder="Milan, London, Online…"/></div>
+        <div class="field ffull"><label>Description</label><input type="text" id="exp-description" placeholder="Brief description"/></div>
+      </div>
+      <div class="save-row">
+        <button class="btn btn-gold" onclick="addExpenseManually()">Save</button>
+        <span class="save-msg" id="exp-save-msg"></span>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Expense edit modal -->
+<div class="emod-wrap" id="expense-edit-modal">
+  <div class="emod">
+    <div class="emod-title">Edit Expense</div>
+    <input type="hidden" id="edit-exp-id"/>
+    <div class="fgrid">
+      <div class="field"><label>Vendor</label><input type="text" id="edit-exp-vendor"/></div>
+      <div class="field"><label>Date</label><input type="date" id="edit-exp-date"/></div>
+      <div class="field"><label>Amount</label><input type="number" id="edit-exp-amount" step="0.01" min="0"/></div>
+      <div class="field"><label>Currency</label>
+        <select id="edit-exp-currency"><option value="EUR">EUR €</option><option value="USD">USD $</option><option value="GBP">GBP £</option><option value="CHF">CHF</option><option value="JPY">JPY ¥</option><option value="AED">AED</option></select>
+      </div>
+      <div class="field"><label>Type</label>
+        <select id="edit-exp-type"><option value="invoice">Invoice</option><option value="receipt">Receipt</option><option value="subscription">Subscription</option><option value="travel">Travel</option><option value="meal">Meal</option><option value="accommodation">Accommodation</option><option value="utilities">Utilities</option><option value="other">Other</option></select>
+      </div>
+      <div class="field"><label>Location</label><input type="text" id="edit-exp-location"/></div>
+      <div class="field ffull"><label>Description</label><input type="text" id="edit-exp-description"/></div>
+    </div>
+    <div class="save-row">
+      <button class="btn btn-gold" onclick="saveExpenseEdit()">Save</button>
+      <button class="btn" onclick="closeExpenseEdit()">Cancel</button>
+      <span class="save-msg" id="edit-exp-msg"></span>
+    </div>
+  </div>
+</div>
+
+<!-- ═══════════════════════════════════════════════ SETTINGS ════════ -->
+<div class="tab-panel" id="tab-settings">
+  <div class="sect-head">
+    <h2>Settings</h2>
+    <p>Connection status and configuration</p>
+  </div>
+  <div class="sect-rule"></div>
+
+  <div class="settings-status" id="settings-status"></div>
+
+  <div class="card">
+    <div class="card-title">Configuration</div>
+    <div class="fgrid" style="margin-bottom:16px;">
+      <div class="field">
+        <label>Poll Interval</label>
+        <select id="cfg-interval">
+          <option value="1">Every 1 minute</option><option value="2">Every 2 minutes</option>
+          <option value="5">Every 5 minutes</option><option value="10">Every 10 minutes</option>
+        </select>
+      </div>
+      <div class="field"><label>VDR Link</label><input type="text" id="cfg-vdr-link" placeholder="https://…"/></div>
+      <div class="field ffull"><label>VDR Info</label><input type="text" id="cfg-vdr-info" placeholder="Brief description of the data room"/></div>
+    </div>
+    <div class="field" style="margin-bottom:18px;">
+      <label>Livia's Instructions</label>
+      <textarea id="cfg-instructions" style="min-height:220px;font-size:12px;line-height:1.7;"></textarea>
+    </div>
+    <div class="save-row">
+      <button class="btn btn-gold" onclick="saveConfig()">Save</button>
+      <span class="save-msg" id="cfg-save-msg"></span>
+    </div>
+  </div>
+
+  <div class="card card-sm">
+    <div style="display:flex;gap:10px;flex-wrap:wrap;">
+      <a href="/auth/login" class="btn">Reauthorize Google</a>
+      <button class="btn btn-ghost" onclick="logout()">Log out</button>
+    </div>
+  </div>
+</div>
+
+</main>
+
+<!-- ═══════════════════════ JAVASCRIPT ══════════════════════════════ -->
+<script>
+'use strict';
+
+let isPolling=false, isAuthorized=false;
+let authToken=sessionStorage.getItem('livia_token')||'';
+let allThreads={}, allProfiles={}, allExpenses=[];
+let activeProfile=null, pollWatcher=null, threadFilter='active';
+
+// ── Helpers ──────────────────────────────────────────────────────────
+function esc(s){return String(s??'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');}
+function safeUrl(u){return /^https?:\/\//.test(String(u||''))?esc(u):'#';}
+
+// ── Auth ─────────────────────────────────────────────────────────────
+async function checkAuth(){
+  try{const r=await fetch('/api/auth/verify',{headers:authToken?{'Authorization':'Bearer '+authToken}:{}});const d=await r.json();if(!d.passwordRequired||d.ok)return;document.getElementById('login-overlay').classList.add('visible');}catch(e){}
+}
+async function doLogin(){
+  const pw=document.getElementById('login-password').value;
+  try{const r=await fetch('/api/auth/verify',{headers:{'Authorization':'Bearer '+pw}});const d=await r.json();
+  if(d.ok){authToken=pw;sessionStorage.setItem('livia_token',pw);document.getElementById('login-overlay').classList.remove('visible');init();}
+  else{document.getElementById('login-error').textContent='Incorrect password.';}}
+  catch(e){document.getElementById('login-error').textContent='Could not connect.';}
+}
+function logout(){authToken='';sessionStorage.removeItem('livia_token');location.reload();}
+
+// ── API ──────────────────────────────────────────────────────────────
+async function api(url,method='GET',body=null){
+  const opts={method,headers:{'Content-Type':'application/json',...(authToken?{'Authorization':'Bearer '+authToken}:{})}};
+  if(body)opts.body=typeof body==='string'?body:JSON.stringify(body);
+  const r=await fetch(url,opts);
+  if(r.status===401){document.getElementById('login-overlay').classList.add('visible');throw new Error('Unauthorized');}
+  if(!r.ok){const e=await r.json().catch(()=>({}));throw new Error(e.error||r.statusText);}
+  return r.json();
+}
+
+// ── Navigation ───────────────────────────────────────────────────────
+function showTab(name,btn){
+  document.querySelectorAll('.tab-panel').forEach(p=>p.classList.remove('active'));
+  document.querySelectorAll('nav button').forEach(b=>b.classList.remove('active'));
+  document.getElementById('tab-'+name).classList.add('active');
+  if(btn)btn.classList.add('active');
+  if(name==='settings')loadConfig();
+  if(name==='crm'){refreshContacts();refreshProfiles();}
+  if(name==='expenses')refreshExpenses();
+}
+
+// ── Overview ─────────────────────────────────────────────────────────
+let OWNER_DISPLAY_NAME='';
+let APP_TZ='';  // configured timezone, fetched from /api/config; '' = use browser local
+function tzNow(){ return APP_TZ ? new Intl.DateTimeFormat('en-GB',{timeZone:APP_TZ,hour:'numeric',hour12:false}).format(new Date()) : String(new Date().getHours()); }
+function setGreeting(){
+  const h=parseInt(tzNow(),10);
+  const who=OWNER_DISPLAY_NAME?(', '+OWNER_DISPLAY_NAME):'';
+  let g;
+  if(h>=5 && h<12) g='Good morning'+who;
+  else if(h>=12 && h<18) g='Good afternoon'+who;
+  else if(h>=18 && h<22) g='Good evening'+who;
+  else g='Good evening'+who;
+  const el=document.getElementById('dash-greeting'); if(el) el.textContent=g;
+}
+// Pull display name + brand from the owner's own config (no personal data shipped in this file)
+async function loadBranding(){
+  try{
+    const c=await api('/api/config');
+    if(c.ownerName && c.ownerName!=='the principal') OWNER_DISPLAY_NAME=c.ownerName;
+    if(c.timezone && c.timezone!=='UTC') APP_TZ=c.timezone;
+    const brand=c.liviaName||'Livia', org=c.orgName||'';
+    document.title=brand+(org?(' · '+org):'');
+    const set=(id,v)=>{const e=document.getElementById(id); if(e) e.textContent=v;};
+    set('brand-title',brand); set('login-brand',brand);
+    set('brand-sub','Executive Assistant'+(org?(' · '+org):''));
+    set('login-org',org||'AI Executive Assistant');
+  }catch(e){/* not authed yet — keep neutral defaults */}
+  setGreeting();
+}
+setGreeting();
+document.getElementById('dash-date').textContent=new Date().toLocaleDateString(undefined,{weekday:'long',day:'numeric',month:'long',year:'numeric'});
+
+async function pollNow(){
+  const btn=document.getElementById('btn-now'); btn.disabled=true;
+  try{await api('/api/polling/now','POST');
+  pollWatcher=setInterval(async()=>{await refreshStatus();},2000);
+  setTimeout(()=>{if(pollWatcher){clearInterval(pollWatcher);pollWatcher=null;}btn.disabled=false;},30000);
+  }catch(e){btn.disabled=false;alert('Could not fetch: '+e.message);}
+}
+async function sendBriefingNow(){
+  const btn=document.querySelector('.btn-gold');
+  try{await api('/api/briefing','POST');const msg=document.createElement('span');msg.style.cssText='font-size:11px;color:var(--laurel);margin-left:10px;';msg.textContent='✓ Sent';btn.parentNode.appendChild(msg);setTimeout(()=>msg.remove(),3000);}
+  catch(e){alert('Could not send briefing: '+e.message);}
+}
+
+// ── Status ───────────────────────────────────────────────────────────
+async function refreshStatus(){
+  try{
+    const s=await api('/api/status');
+    isPolling=s.isPolling; isAuthorized=s.isAuthorized;
+    const dot=document.getElementById('status-dot'),txt=document.getElementById('status-text');
+    if(!isAuthorized){dot.className='sdot warn';txt.textContent='Not Authorized';}
+    else if(isPolling){dot.className='sdot on';txt.textContent='Active';}
+    else{dot.className='sdot';txt.textContent='Idle';}
+    document.getElementById('ds-processed').textContent=s.processedCount??'—';
+    document.getElementById('ds-threads').textContent=s.activeThreads??'—';
+    document.getElementById('ds-profiles').textContent=Object.keys(allProfiles).length||'—';
+    document.getElementById('ds-expenses').textContent=allExpenses.length||'—';
+    const al=document.getElementById('auth-alert');
+    if(!isAuthorized){al.innerHTML=`<div class="alert alert-warn">Livia is not connected to Google. <a href="/auth/login" class="btn btn-gold btn-sm" style="margin-left:10px;">Connect Now</a></div>`;}
+    else{al.innerHTML='';}
+    const localHour=parseInt(tzNow(),10);
+    const withinHours=localHour>=9&&localHour<22;
+    document.getElementById('hours-banner').style.display=(isPolling&&!withinHours)?'block':'none';
+    const gHtml=isAuthorized?'<span class="srow-val ok">✓ Connected</span>':`<a href="/auth/login" class="btn btn-gold btn-sm">Connect Google</a>`;
+    document.getElementById('settings-status').innerHTML=`
+      <div class="srow"><span class="srow-lbl">Google Account</span>${gHtml}</div>
+      <div class="srow"><span class="srow-lbl">Anthropic API</span><span class="srow-val ${s.hasApiKey?'ok':'bad'}">${s.hasApiKey?'✓ Key set':'✗ Missing'}</span></div>
+      <div class="srow"><span class="srow-lbl">Email Polling</span><span class="srow-val ${isPolling?'ok':''}">${isPolling?(withinHours?'✓ Active':'🌙 Read-only'):'Idle'}</span></div>
+      <div class="srow"><span class="srow-lbl">Emails Processed</span><span class="srow-val">${s.processedCount}</span></div>
+      <div class="srow"><span class="srow-lbl">Active Threads</span><span class="srow-val">${s.activeThreads}</span></div>
+      <div class="srow"><span class="srow-lbl">Storage</span><span class="srow-val ${s.dataDir==='/var/data'?'ok':'warn'}">${s.dataDir==='/var/data'?'✓ Persistent':'⚠ Ephemeral'}</span></div>`;
+  }catch(e){}
+}
+
+// ── Threads ──────────────────────────────────────────────────────────
+const STAGE_MAP={
+  'waiting_for_slots':                {cls:'b-await',label:'Awaiting your available slots'},
+  'waiting_for_owner_confirmation':{cls:'b-gius', label:'Awaiting your confirmation'},
+  'waiting_for_confirmation':         {cls:'b-conf', label:'Awaiting their reply'},
+  'waiting_booking_confirmation':     {cls:'b-book', label:'Awaiting booking confirmation'},
+  'waiting_draft_approval':           {cls:'b-draft',label:'Draft pending your approval'},
+  'done':      {cls:'b-done',label:'Completed'},
+  'cancelled': {cls:'b-canc',label:'Cancelled'},
+};
+const SAFE_STAGES=new Set(Object.keys(STAGE_MAP));
+
+function setFilter(f,btn){
+  threadFilter=f;
+  document.querySelectorAll('.chips .chip').forEach(b=>b.classList.remove('on'));
+  if(btn)btn.classList.add('on');
+  renderThreads();
+}
+async function refreshThreads(){try{allThreads=await api('/api/threads');renderThreads();}catch(e){}}
+function renderThreads(){
+  const entries=Object.entries(allThreads);
+  let visible=entries;
+  if(threadFilter==='active')visible=entries.filter(([,t])=>t.stage!=='done'&&t.stage!=='cancelled');
+  if(threadFilter==='done')  visible=entries.filter(([,t])=>t.stage==='done'||t.stage==='cancelled');
+  const active=entries.filter(([,t])=>t.stage!=='done'&&t.stage!=='cancelled').length;
+  const badge=document.getElementById('threads-badge');
+  badge.textContent=active;badge.className='nbadge'+(active===0?' zero':'');
+  const list=document.getElementById('threads-list');
+  if(!visible.length){list.innerHTML=`<div class="empty"><span class="empty-glyph">✦</span><p>${threadFilter==='active'?'No active threads':'No threads to show'}</p></div>`;return;}
+  visible.sort(([,a],[,b])=>{
+    const r=t=>t.stage!=='done'&&t.stage!=='cancelled'?2:1;
+    return r(b)-r(a);
+  });
+  list.innerHTML=visible.map(([threadId,t])=>{
+    const safe=SAFE_STAGES.has(t.stage)?t.stage:'unknown';
+    const{cls,label}=STAGE_MAP[safe]||{cls:'b-await',label:'Pending'};
+    const isDone=t.stage==='done',isCancelled=t.stage==='cancelled';
+    const cardCls='tc'+(isDone?' done':isCancelled?' cancelled':t.stage==='waiting_booking_confirmation'?' booking':t.stage==='waiting_draft_approval'?' draft':'');
+    const delBtn=`<button class="btn btn-xs btn-danger" style="float:right;font-size:9px;padding:2px 8px;opacity:.6;" data-tid="${esc(threadId)}" onclick="event.stopPropagation();deleteThread(this.dataset.tid)">✕</button>`;
+    const name=esc(t.thirdPartyFirstName||t.restaurantName||t.thirdPartyEmail||'—');
+    const email=esc(t.thirdPartyEmail||t.restaurantEmail||'');
+    const subj=t.originalSubject?`"${esc(t.originalSubject)}"`:'' ;
+    const lastProf=t.thirdPartyEmail&&allProfiles[t.thirdPartyEmail];
+    const lastContact=lastProf?.lastContact?new Date(lastProf.lastContact).toLocaleDateString('en-GB',{day:'numeric',month:'long',year:'numeric'}):null;
+    const awaitLine=(t.stage==='waiting_for_confirmation'||t.stage==='waiting_booking_confirmation')&&lastContact
+      ?`<div class="tc-last">Last email sent on ${lastContact}</div>`:'';
+    const calLink=t.calendarLink&&/^https:\/\//.test(t.calendarLink)
+      ?`<div class="tc-detail" style="margin-top:6px;"><a href="${esc(t.calendarLink)}" target="_blank" rel="noopener noreferrer" style="color:var(--gold);font-weight:500;">View Calendar Event →</a></div>`:'';
+    const confirmed=t.confirmedTime?`<div class="tc-detail">Confirmed: ${esc(t.confirmedTime)}</div>`:'';
+    return `<div class="${cardCls}">
+      ${delBtn}
+      <div class="tc-name">${name}</div>
+      <div class="tc-meta">${email}${subj?' · '+subj:''}</div>
+      <span class="tc-badge ${cls}">${label}</span>
+      ${awaitLine}${confirmed}${calLink}
+    </div>`;
+  }).join('');
+}
+
+async function deleteThread(threadId){
+  if(!confirm('Remove this thread?'))return;
+  try{await api('/api/threads/'+encodeURIComponent(threadId),'DELETE');delete allThreads[threadId];renderThreads();}catch(e){alert('Could not remove thread: '+e.message);}
+}
+async function clearDoneThreads(){
+  const done=Object.entries(allThreads).filter(([,t])=>t.stage==='done'||t.stage==='cancelled').length;
+  if(!done){alert('No completed threads to clear.');return;}
+  if(!confirm(`Clear ${done} completed/cancelled thread(s)?`))return;
+  try{await api('/api/threads/clear-done','POST');await refreshThreads();}catch(e){alert('Could not clear threads: '+e.message);}
+}
+
+// ── CRM ──────────────────────────────────────────────────────────────
+function showCRMTab(tab){
+  document.getElementById('crm-panel-profiles').style.display=tab==='profiles'?'':'none';
+  document.getElementById('crm-panel-address').style.display=tab==='address'?'':'none';
+  document.getElementById('crm-panel-add').style.display=tab==='add'?'':'none';
+  document.querySelectorAll('.cstab').forEach(b=>b.classList.remove('on'));
+  document.getElementById('cstab-'+tab)?.classList.add('on');
+  if(tab==='address')refreshContacts();
+}
+async function refreshContacts(){
+  try{
+    const data=await api('/api/contacts');
+    const entries=Object.entries(data).sort(([,a],[,b])=>new Date(b.lastSeen||0)-new Date(a.lastSeen||0));
+    const b2=document.getElementById('contacts-badge2');
+    if(b2){b2.textContent=entries.length;b2.className='nbadge'+(entries.length===0?' zero':'');}
+    const list=document.getElementById('contacts-list');
+    if(!entries.length){list.innerHTML='<div class="empty"><span class="empty-glyph">✦</span><p>No contacts yet</p></div>';return;}
+    list.innerHTML=entries.map(([key,c])=>{
+      const date=c.lastSeen?new Date(c.lastSeen).toLocaleDateString('en-GB',{day:'numeric',month:'short'}):'—';
+      return `<div class="addr-row">
+        <div class="ar-name">${esc(c.name||key)}</div>
+        <div class="ar-email">${esc(c.email)}</div>
+        <div class="ar-date">${date}</div>
+        <button class="btn btn-xs btn-danger" data-key="${esc(key)}" onclick="deleteContact(this.dataset.key)">Remove</button>
+      </div>`;
+    }).join('');
+  }catch(e){}
+}
+async function addContact(){
+  const name=document.getElementById('new-contact-name').value.trim();
+  const email=document.getElementById('new-contact-email').value.trim().toLowerCase();
+  if(!name||!email.includes('@')){alert('Please enter a name and valid email.');return;}
+  try{
+    await api('/api/contacts','POST',{name,email});
+    document.getElementById('new-contact-name').value='';document.getElementById('new-contact-email').value='';
+    const msg=document.getElementById('contact-save-msg');msg.textContent='✓ Saved';msg.classList.add('show');setTimeout(()=>msg.classList.remove('show'),2000);
+    await refreshContacts();showCRMTab('address');
+  }catch(e){alert('Could not add contact: '+e.message);}
+}
+async function deleteContact(key){
+  if(!confirm(`Remove "${key}"?`))return;
+  try{await api('/api/contacts/'+encodeURIComponent(key),'DELETE');await refreshContacts();}catch(e){alert('Could not remove: '+e.message);}
+}
+
+const REL_CLASSES={investor:'ri',advisor:'ra',lawyer:'rl',accountant:'rac',banker:'rb',partner:'rp',vendor:'rv',client:'rc',friend:'rf',family:'rfam'};
+async function refreshProfiles(){
+  try{
+    allProfiles=await api('/api/profiles');renderProfiles();
+    const count=Object.keys(allProfiles).length;
+    const b=document.getElementById('crm-badge');b.textContent=count;b.className='nbadge'+(count===0?' zero':'');
+    document.getElementById('ds-profiles').textContent=count||'—';
+  }catch(e){}
+}
+function renderProfiles(){
+  const search=(document.getElementById('crm-search')?.value||'').toLowerCase();
+  const rel=document.getElementById('crm-filter-rel')?.value||'';
+  let entries=Object.entries(allProfiles).filter(([email,p])=>{
+    if(rel&&(p.relationship||'other')!==rel)return false;
+    if(!search)return true;
+    return(p.name||'').toLowerCase().includes(search)||email.toLowerCase().includes(search)||(p.company||'').toLowerCase().includes(search)||(p.role||'').toLowerCase().includes(search);
+  }).sort(([,a],[,b])=>new Date(b.lastContact||0)-new Date(a.lastContact||0));
+  const countEl=document.getElementById('crm-count');
+  countEl.textContent=entries.length?`— ${entries.length} contact${entries.length!==1?'s':''}` :'';
+  const grid=document.getElementById('crm-grid');
+  if(!entries.length){grid.innerHTML=`<div class="empty" style="grid-column:1/-1"><span class="empty-glyph">✦</span><p>${Object.keys(allProfiles).length?'No contacts match filter':'No profiles yet — click "Build from Gmail"'}</p></div>`;return;}
+  grid.innerHTML=entries.map(([email,p])=>{
+    const rc=REL_CLASSES[p.relationship||'other']||'';
+    const last=p.lastContact?new Date(p.lastContact).toLocaleDateString('en-GB',{day:'numeric',month:'short',year:'numeric'}):'—';
+    const open=(p.openItems||[]).length;
+    return `<div class="p-card ${rc}" data-email="${esc(email)}" onclick="openProfileModal(this.dataset.email)">
+      <div class="p-name">${esc(p.name||email.split('@')[0])}</div>
+      <div class="p-email">${esc(email)}</div>
+      <div class="p-tags">
+        ${p.relationship?`<span class="p-tag rel">${esc(p.relationship)}</span>`:''}
+        ${p.company?`<span class="p-tag">${esc(p.company)}</span>`:''}
+        ${p.language&&p.language!=='English'?`<span class="p-tag" style="color:var(--gold);border-color:var(--gold);">${esc(p.language)}</span>`:''}
+      </div>
+      <div class="p-stats"><span>✉ ${p.totalEmails||0}</span><span>◷ ${last}</span></div>
+      ${open?`<div class="p-open">⚠ ${open} open item${open!==1?'s':''}</div>`:''}
+    </div>`;
+  }).join('');
+}
+function openProfileModal(email){
+  const p=allProfiles[email];if(!p)return;
+  activeProfile=email;
+  document.getElementById('modal-name').textContent=p.name||email.split('@')[0];
+  document.getElementById('modal-email').textContent=email;
+  document.getElementById('modal-name-input').value=p.name||'';
+  document.getElementById('modal-company-input').value=p.company||'';
+  document.getElementById('modal-role-input').value=p.role||'';
+  document.getElementById('modal-phone-input').value=p.phone||'';
+  document.getElementById('modal-lang-input').value=p.language||'';
+  document.getElementById('modal-notes').value=p.notes||'';
+  document.getElementById('modal-tone-input').value=p.tone||'';
+  document.getElementById('modal-total').textContent=p.totalEmails||0;
+  document.getElementById('modal-last').textContent=p.lastContact?new Date(p.lastContact).toLocaleDateString('en-GB',{day:'numeric',month:'long',year:'numeric'}):'—';
+  document.getElementById('modal-rel-select').value=p.relationship||'other';
+  const aliases=p.aliases||[];
+  document.getElementById('modal-aliases').innerHTML=aliases.length
+    ?aliases.map(a=>`<div style="display:flex;align-items:center;gap:8px;padding:4px 0;font-size:12px;"><span style="flex:1;color:var(--ink-mid);">${esc(a)}</span><button class="btn btn-xs btn-danger" data-alias="${esc(a)}" onclick="removeAlias(this.dataset.alias)">Remove</button></div>`).join('')
+    :'<div style="color:var(--ink-ghost);font-size:12px;padding:4px 0;">No aliases yet.</div>';
+  const openItems=p.openItems||[];
+  document.getElementById('modal-open-section').style.display=openItems.length?'block':'none';
+  document.getElementById('modal-open-items').innerHTML=openItems.map(i=>`<div class="open-item">⚠ ${esc(i)}</div>`).join('');
+  const ix=(p.interactions||[]).slice().reverse();
+  document.getElementById('modal-interactions').innerHTML=ix.length
+    ?ix.map(i=>{const d=new Date(i.date).toLocaleDateString('en-GB',{day:'numeric',month:'short',year:'numeric'});return`<div class="irow"><div class="imeta">${i.direction==='sent'?'→':'←'} ${d} · ${esc(i.subject)}</div><div style="color:var(--ink-mid);font-size:12px;">${esc(i.summary||'')}</div></div>`;}).join('')
+    :'<div style="color:var(--ink-ghost);font-size:12px;padding:8px 0;">No interactions recorded yet.</div>';
+  document.getElementById('profile-modal').classList.add('visible');
+}
+function closeProfileModal(){document.getElementById('profile-modal').classList.remove('visible');activeProfile=null;}
+async function saveProfileField(field,value){
+  if(!activeProfile)return;
+  try{await api('/api/profiles/'+encodeURIComponent(activeProfile),'PATCH',{[field]:value});allProfiles[activeProfile][field]=value;if(field==='name')document.getElementById('modal-name').textContent=value||activeProfile.split('@')[0];renderProfiles();}
+  catch(e){alert('Could not save: '+e.message);}
+}
+async function addAlias(){
+  if(!activeProfile)return;
+  const alias=document.getElementById('modal-alias-input').value.trim().toLowerCase();
+  if(!alias.includes('@')){alert('Please enter a valid email address.');return;}
+  try{await api('/api/profiles/'+encodeURIComponent(activeProfile)+'/alias','POST',{aliasEmail:alias});document.getElementById('modal-alias-input').value='';await refreshProfiles();openProfileModal(activeProfile);}catch(e){alert('Could not add alias: '+e.message);}
+}
+async function removeAlias(alias){
+  if(!activeProfile)return;
+  try{await api('/api/profiles/'+encodeURIComponent(activeProfile)+'/alias/'+encodeURIComponent(alias),'DELETE');await refreshProfiles();openProfileModal(activeProfile);}catch(e){alert('Could not remove alias: '+e.message);}
+}
+async function deleteProfile(){
+  if(!activeProfile)return;
+  if(!confirm(`Remove profile for "${allProfiles[activeProfile]?.name||activeProfile}"?`))return;
+  try{await api('/api/profiles/'+encodeURIComponent(activeProfile),'DELETE');delete allProfiles[activeProfile];closeProfileModal();renderProfiles();const count=Object.keys(allProfiles).length;const b=document.getElementById('crm-badge');b.textContent=count;b.className='nbadge'+(count===0?' zero':'');}
+  catch(e){alert('Could not delete: '+e.message);}
+}
+function downloadVcf(){
+  window.open('/api/contacts/export.vcf','_blank');
+}
+async function syncGoogleContacts(){
+  if(!confirm('Sync all CRM contacts to Google Contacts? (They will appear on your iPhone via Google account sync.)'))return;
+  try{
+    const r=await api('/api/contacts/sync-google','POST');
+    alert(r.message||'Sync started — check the logs for progress.');
+  }catch(e){
+    if(e.message.includes('Authorization link sent'))alert('Authorization link sent to your email. Click it to authorize, then press Sync again.');
+    else if(e.message.includes('not authorized')||e.message.includes('NOT_AUTHORIZED'))alert('Check your email — Livia sent you an authorization link. Click it, then try again.');
+    else alert('Sync failed: '+e.message);
+  }
+}
+async function startBootstrap(){
+  if(!confirm('This will scan Livia\'s Gmail history (last 6 months) and build CRM profiles. May take several minutes. Continue?'))return;
+  try{
+    await api('/api/profiles/bootstrap','POST');
+    document.getElementById('bootstrap-bar').style.display='block';document.getElementById('btn-bootstrap').disabled=true;
+    const poll=setInterval(async()=>{try{const s=await api('/api/profiles/bootstrap/status');if(!s.running){clearInterval(poll);document.getElementById('bootstrap-bar').style.display='none';document.getElementById('btn-bootstrap').disabled=false;await refreshProfiles();}}catch(e){clearInterval(poll);document.getElementById('btn-bootstrap').disabled=false;}},3000);
+  }catch(e){alert('Bootstrap failed: '+e.message);}
+}
+document.getElementById('profile-modal').addEventListener('click',function(e){if(e.target===this)closeProfileModal();});
+
+// ── CRM Excel export ──────────────────────────────────────────────────
+function downloadCrmExcel(){
+  if(!allProfiles||!Object.keys(allProfiles).length){alert('No CRM data to export.');return;}
+  const rows=[['Name','Email','Company','Role','Phone','Relationship','Language','Total Emails','Last Contact','Aliases','Notes']];
+  for(const[email,p]of Object.entries(allProfiles).sort((a,b)=>(a[1].name||'').localeCompare(b[1].name||''))){
+    rows.push([
+      p.name||'',email,p.company||'',p.role||'',p.phone||'',
+      p.relationship||'',p.language||'',p.totalEmails||0,
+      p.lastContact?new Date(p.lastContact).toLocaleDateString('en-GB'):'',
+      (p.aliases||[]).join('; '),p.notes||''
+    ]);
+  }
+  // Build CSV with BOM for Excel compatibility
+  const bom='\uFEFF';
+  const csv=bom+rows.map(r=>r.map(c=>`"${String(c).replace(/"/g,'""')}"`).join(',')).join('\n');
+  const blob=new Blob([csv],{type:'text/csv;charset=utf-8;'});
+  const url=URL.createObjectURL(blob);
+  const a=document.createElement('a');
+  a.href=url;a.download=`livia_crm_${new Date().toISOString().slice(0,10)}.csv`;
+  a.click();URL.revokeObjectURL(url);
+}
+
+
+// ── Expenses ─────────────────────────────────────────────────────────
+const TC={invoice:'#a87c3e',receipt:'#2d5a3d',subscription:'#1e3a6e',travel:'#4c2b8a',meal:'#7a4a10',accommodation:'#0c5a6e',utilities:'#4a6040',other:'#4a4440'};
+const TL={invoice:'Invoice',receipt:'Receipt',subscription:'Subscription',travel:'Travel',meal:'Meal',accommodation:'Accommodation',utilities:'Utilities',other:'Other'};
+function showExpenseTab(tab){
+  document.getElementById('expense-panel-register').style.display=tab==='register'?'':'none';
+  document.getElementById('expense-panel-add').style.display=tab==='add'?'':'none';
+  document.querySelectorAll('.etab').forEach(b=>b.classList.remove('on'));
+  document.getElementById('etab-'+tab).classList.add('on');
+  if(tab==='add'&&!document.getElementById('exp-date').value)document.getElementById('exp-date').valueAsDate=new Date();
+}
+async function refreshExpenses(){
+  try{allExpenses=await api('/api/expenses');renderExpenses();renderExpenseSummary();const b=document.getElementById('expenses-badge');b.textContent=allExpenses.length;b.className='nbadge'+(allExpenses.length===0?' zero':'');document.getElementById('ds-expenses').textContent=allExpenses.length||'—';}catch(e){}
+}
+function renderExpenseSummary(){
+  const c=document.getElementById('expense-summary-cards');if(!allExpenses.length){c.innerHTML='';return;}
+  const byCur={},byType={};let thisMonth=0,tCur='EUR';const now=new Date();
+  for(const e of allExpenses){const k=e.currency||'EUR';byCur[k]=(byCur[k]||0)+(parseFloat(e.amount)||0);byType[e.type||'other']=(byType[e.type||'other']||0)+1;const d=new Date(e.date);if(d.getMonth()===now.getMonth()&&d.getFullYear()===now.getFullYear()){thisMonth+=parseFloat(e.amount)||0;tCur=k;}}
+  const topCur=Object.entries(byCur).sort((a,b)=>b[1]-a[1])[0];
+  const topType=Object.entries(byType).sort((a,b)=>b[1]-a[1])[0];
+  const sc=(lbl,val,sub='')=>`<div class="stat-card"><div class="sc-label">${lbl}</div><div class="sc-value">${val}</div>${sub?`<div class="sc-sub">${sub}</div>`:''}</div>`;
+  c.innerHTML=sc('Total Expenses',allExpenses.length+' items',Object.entries(byCur).map(([k,a])=>`${k} ${a.toFixed(2)}`).join(' · '))+sc('This Month',tCur+' '+thisMonth.toFixed(2))+(topCur?sc('Largest Currency',topCur[0],topCur[1].toFixed(2)):'' )+(topType?sc('Top Category',TL[topType[0]]||topType[0],topType[1]+' items'):'');
+}
+function renderExpenses(){
+  const search=(document.getElementById('expenses-search')?.value||'').toLowerCase();
+  const tf=document.getElementById('expenses-filter-type')?.value||'';
+  const filtered=allExpenses.filter(e=>(!tf||(e.type||'other')===tf)&&(!search||(e.vendor||'').toLowerCase().includes(search)||(e.description||'').toLowerCase().includes(search)||(e.location||'').toLowerCase().includes(search)));
+  document.getElementById('expenses-count').textContent=filtered.length?`— ${filtered.length} item${filtered.length!==1?'s':''}` :'';
+  const tbody=document.getElementById('expenses-tbody');
+  if(!filtered.length){tbody.innerHTML='<tr><td colspan="8" style="text-align:center;padding:44px;color:var(--ink-ghost);">No expenses match filter</td></tr>';return;}
+  tbody.innerHTML=[...filtered].sort((a,b)=>new Date(b.date)-new Date(a.date)).map((e,i)=>{
+    const date=new Date(e.date).toLocaleDateString('en-GB',{day:'numeric',month:'short',year:'numeric'});
+    const tc=TC[e.type||'other']||'#4a4440';const tl=TL[e.type||'other']||(e.type||'—');
+    const id=esc(e.id||String(allExpenses.indexOf(e)));
+    return`<tr style="background:${i%2===0?'var(--parch-lt)':'var(--parch)'}">
+      <td style="white-space:nowrap;color:var(--ink-soft);font-size:12px;">${esc(date)}</td>
+      <td style="font-weight:500;">${esc(e.vendor||'—')}</td>
+      <td style="text-align:right;font-weight:500;white-space:nowrap;">${esc(e.currency||'EUR')} ${parseFloat(e.amount||0).toFixed(2)}</td>
+      <td><span class="type-pill" style="background:${tc}18;color:${tc};">${esc(tl)}</span></td>
+      <td style="color:var(--ink-soft);font-size:12px;">${esc(e.location||'—')}</td>
+      <td style="color:var(--ink-soft);font-size:12px;max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${esc(e.description||'')}">${esc(e.description||e.emailSubject||'—')}</td>
+      <td style="text-align:center;">${e.receiptEmailId?`<span style="color:var(--laurel);" title="${esc(e.emailSubject||'')}">📎</span>`:'<span style="color:var(--ink-ghost);">—</span>'}</td>
+      <td style="text-align:center;white-space:nowrap;"><button class="btn btn-xs" onclick="openExpenseEdit('${id}')" style="margin-right:3px;">Edit</button><button class="btn btn-xs btn-danger" onclick="deleteExpense('${id}')">Del</button></td>
+    </tr>`;
+  }).join('');
+}
+async function addExpenseManually(){
+  const vendor=document.getElementById('exp-vendor').value.trim();const amount=document.getElementById('exp-amount').value;const date=document.getElementById('exp-date').value;
+  if(!vendor||!amount||!date){alert('Vendor, amount and date are required.');return;}
+  try{await api('/api/expenses','POST',{vendor,amount,date,currency:document.getElementById('exp-currency').value,type:document.getElementById('exp-type').value,location:document.getElementById('exp-location').value.trim(),description:document.getElementById('exp-description').value.trim()});['exp-vendor','exp-amount','exp-location','exp-description'].forEach(id=>document.getElementById(id).value='');document.getElementById('exp-date').value='';const msg=document.getElementById('exp-save-msg');msg.textContent='✓ Saved';msg.classList.add('show');setTimeout(()=>msg.classList.remove('show'),2500);await refreshExpenses();showExpenseTab('register');}
+  catch(e){alert('Failed to save: '+e.message);}
+}
+function openExpenseEdit(id){const e=allExpenses.find(x=>x.id===id)||allExpenses[parseInt(id)];if(!e)return;document.getElementById('edit-exp-id').value=e.id||id;document.getElementById('edit-exp-vendor').value=e.vendor||'';document.getElementById('edit-exp-date').value=e.date?e.date.slice(0,10):'';document.getElementById('edit-exp-amount').value=e.amount||'';document.getElementById('edit-exp-currency').value=e.currency||'EUR';document.getElementById('edit-exp-type').value=e.type||'other';document.getElementById('edit-exp-location').value=e.location||'';document.getElementById('edit-exp-description').value=e.description||'';document.getElementById('expense-edit-modal').classList.add('open');}
+function closeExpenseEdit(){document.getElementById('expense-edit-modal').classList.remove('open');}
+async function saveExpenseEdit(){const id=document.getElementById('edit-exp-id').value;try{await api(`/api/expenses/${encodeURIComponent(id)}`,'PATCH',{vendor:document.getElementById('edit-exp-vendor').value.trim(),date:document.getElementById('edit-exp-date').value,amount:document.getElementById('edit-exp-amount').value,currency:document.getElementById('edit-exp-currency').value,type:document.getElementById('edit-exp-type').value,location:document.getElementById('edit-exp-location').value.trim(),description:document.getElementById('edit-exp-description').value.trim()});const msg=document.getElementById('edit-exp-msg');msg.textContent='✓ Saved';msg.classList.add('show');setTimeout(()=>{msg.classList.remove('show');closeExpenseEdit();},1200);await refreshExpenses();}catch(e){alert('Failed: '+e.message);}}
+async function deleteExpense(id){if(!confirm('Delete this expense?'))return;try{await api(`/api/expenses/${encodeURIComponent(id)}`,'DELETE');await refreshExpenses();}catch(e){alert('Delete failed: '+e.message);}}
+async function exportExpensesZip(){try{const res=await fetch('/api/expenses/export/zip',{headers:authToken?{'Authorization':'Bearer '+authToken}:{}});if(!res.ok)throw new Error('Export failed');const blob=await res.blob();const url=URL.createObjectURL(blob);const a=document.createElement('a');a.href=url;a.download=`livia_expenses_${new Date().toISOString().slice(0,10)}.zip`;a.click();URL.revokeObjectURL(url);}catch(e){alert('Export failed: '+e.message);}}
+document.getElementById('expense-edit-modal').addEventListener('click',function(e){if(e.target===this)closeExpenseEdit();});
+
+// ── Settings ─────────────────────────────────────────────────────────
+async function loadConfig(){try{const c=await api('/api/config');const sel=document.getElementById('cfg-interval');if(sel)sel.value=c.pollIntervalMinutes||1;document.getElementById('cfg-instructions').value=c.instructions||'';document.getElementById('cfg-vdr-link').value=c.vdrLink||'';document.getElementById('cfg-vdr-info').value=c.vdrInfo||'';}catch(e){}}
+async function saveConfig(){try{await api('/api/config','POST',{pollIntervalMinutes:parseInt(document.getElementById('cfg-interval').value)||1,instructions:document.getElementById('cfg-instructions').value,vdrLink:document.getElementById('cfg-vdr-link').value.trim(),vdrInfo:document.getElementById('cfg-vdr-info').value.trim()});const msg=document.getElementById('cfg-save-msg');msg.textContent='✓ Saved';msg.classList.add('show');setTimeout(()=>msg.classList.remove('show'),2000);}catch(e){alert('Could not save: '+e.message);}}
+
+// ── Boot ─────────────────────────────────────────────────────────────
+function init(){loadBranding();refreshStatus();refreshThreads();refreshProfiles();refreshExpenses();}
+checkAuth().then(()=>init());
+setInterval(refreshStatus,6000);
+setInterval(refreshThreads,6000);
+</script>
+</body>
+</html>

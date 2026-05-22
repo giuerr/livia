@@ -1,0 +1,170 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Set up your assistant</title>
+<style>
+  :root { --bg:#1a1714; --panel:#231f1b; --line:#3a332c; --text:#f5f0e8; --muted:#b3a896; --gold:#b8965a; --ok:#7fb069; --err:#e07070; }
+  * { box-sizing:border-box; }
+  body { margin:0; font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,monospace; background:var(--bg); color:var(--text); line-height:1.5; }
+  .wrap { max-width:720px; margin:0 auto; padding:40px 20px 80px; }
+  h1 { font-weight:600; font-size:1.7rem; margin:0 0 4px; }
+  h2 { font-weight:600; font-size:1.1rem; color:var(--gold); margin:32px 0 12px; border-bottom:1px solid var(--line); padding-bottom:8px; }
+  p.lead { color:var(--muted); margin:0 0 8px; }
+  .banner { background:#2a2118; border:1px solid var(--gold); border-radius:8px; padding:14px 16px; margin:20px 0; font-size:.95rem; }
+  .banner.ok { border-color:var(--ok); background:#1e2a1c; }
+  label { display:block; margin:14px 0 4px; font-size:.9rem; }
+  label .req { color:var(--gold); }
+  label .set { float:right; color:var(--ok); font-size:.8rem; }
+  input { width:100%; padding:10px 12px; background:var(--panel); border:1px solid var(--line); border-radius:6px; color:var(--text); font-size:.95rem; font-family:inherit; }
+  input:focus { outline:none; border-color:var(--gold); }
+  .hint { color:var(--muted); font-size:.82rem; margin:4px 0 0; }
+  .hint a { color:var(--gold); }
+  .row { display:flex; gap:12px; flex-wrap:wrap; margin-top:24px; align-items:center; }
+  button { padding:11px 20px; border-radius:6px; border:1px solid var(--gold); background:var(--gold); color:#1a1714; font-weight:600; font-size:.95rem; cursor:pointer; font-family:inherit; }
+  button.ghost { background:transparent; color:var(--gold); }
+  button:disabled { opacity:.4; cursor:not-allowed; }
+  a.btn { display:inline-block; text-decoration:none; padding:11px 20px; border-radius:6px; border:1px solid var(--gold); color:var(--gold); font-weight:600; font-size:.95rem; }
+  a.btn.disabled { opacity:.4; pointer-events:none; }
+  .pill { display:inline-block; padding:2px 10px; border-radius:999px; font-size:.78rem; border:1px solid var(--line); color:var(--muted); }
+  .pill.on { color:var(--ok); border-color:var(--ok); }
+  #msg { margin-top:16px; font-size:.92rem; min-height:1.2em; }
+  #msg.ok { color:var(--ok); } #msg.err { color:var(--err); }
+  code { background:#000; padding:1px 6px; border-radius:4px; color:var(--gold); font-size:.85rem; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>🌿 Set up your assistant</h1>
+  <p class="lead">Configure your AI executive assistant. Everything you enter is stored locally in <code>setup.json</code> on your own server — nothing is sent anywhere else.</p>
+
+  <div id="status-banner" class="banner">Loading current status…</div>
+
+  <form id="setup-form" autocomplete="off">
+    <h2>1 · About you</h2>
+    <label>Your name <span class="req">*</span><span class="set" data-set="ownerName"></span></label>
+    <input name="ownerName" placeholder="e.g. Jordan Smith" />
+    <p class="hint">Used in greetings, the email signature, and how the assistant refers to you.</p>
+
+    <label>Organisation / brand name<span class="set" data-set="orgName"></span></label>
+    <input name="orgName" placeholder="e.g. Acme Capital (optional)" />
+
+    <label>Your primary email <span class="req">*</span><span class="set" data-set="ownerEmail"></span></label>
+    <input name="ownerEmail" type="email" placeholder="you@yourdomain.com" />
+
+    <label>All your email addresses<span class="set" data-set="ownerEmails"></span></label>
+    <input name="ownerEmails" placeholder="you@work.com, you@personal.com (comma-separated)" />
+    <p class="hint">The assistant only takes instructions from these addresses. Defaults to your primary email.</p>
+
+    <label>Your phone (with country code)<span class="set" data-set="ownerPhone"></span></label>
+    <input name="ownerPhone" placeholder="+1 555 123 4567 (optional)" />
+
+    <label>Timezone<span class="set" data-set="timezone"></span></label>
+    <input name="timezone" placeholder="e.g. America/New_York or Europe/London (defaults to UTC)" />
+    <p class="hint">IANA timezone the assistant schedules in. Defaults to UTC.</p>
+
+    <h2>2 · Your assistant</h2>
+    <label>Assistant's name<span class="set" data-set="liviaName"></span></label>
+    <input name="liviaName" placeholder="Livia (default)" />
+
+    <label>Assistant's Gmail address <span class="req">*</span><span class="set" data-set="liviaEmail"></span></label>
+    <input name="liviaEmail" type="email" placeholder="your.assistant@gmail.com" />
+    <p class="hint">Create a <strong>dedicated Gmail account</strong> for your assistant to send and receive from —
+      <a href="https://accounts.google.com/signup" target="_blank" rel="noopener">make one here</a>, then enter it above.
+      You'll connect it in step 4.</p>
+
+    <h2>3 · AI &amp; security</h2>
+    <label>Anthropic API key <span class="req">*</span><span class="set" data-set="anthropicKey"></span></label>
+    <input name="anthropicKey" type="password" placeholder="sk-ant-…" />
+    <p class="hint">Powers the assistant. Get one at <a href="https://console.anthropic.com" target="_blank" rel="noopener">console.anthropic.com</a>. Stored write-only.</p>
+
+    <label>Dashboard password<span class="set" data-set="dashboardPassword"></span></label>
+    <input name="dashboardPassword" type="password" placeholder="Protects the dashboard (strongly recommended)" />
+
+    <h2>4 · Google connection</h2>
+    <p class="hint">Create an OAuth client (Web application) in the
+      <a href="https://console.cloud.google.com/apis/credentials" target="_blank" rel="noopener">Google Cloud Console</a>,
+      enable the Gmail &amp; Calendar APIs, and add your redirect URI:
+      <code id="redirect-uri">…</code></p>
+
+    <label>Google OAuth client ID <span class="req">*</span><span class="set" data-set="googleClientId"></span></label>
+    <input name="googleClientId" placeholder="…apps.googleusercontent.com" />
+
+    <label>Google OAuth client secret <span class="req">*</span><span class="set" data-set="googleClientSecret"></span></label>
+    <input name="googleClientSecret" type="password" placeholder="GOCSPX-…" />
+
+    <label>OAuth redirect URI<span class="set" data-set="googleRedirectUri"></span></label>
+    <input name="googleRedirectUri" placeholder="auto — leave blank to use the default shown above" />
+
+    <label style="margin-top:18px">Dashboard password (to authorize changes after first setup)</label>
+    <input id="auth-pw" type="password" placeholder="Only needed once setup is complete" />
+    <p class="hint">Leave blank during first-time setup.</p>
+
+    <div class="row">
+      <button type="submit" id="save-btn">Save configuration</button>
+      <span id="msg"></span>
+    </div>
+  </form>
+
+  <h2>Connect Google accounts</h2>
+  <p class="hint">Available after you've <strong>saved</strong> your Google client ID/secret and <strong>restarted</strong> the server.</p>
+  <div class="row">
+    <a id="connect-gmail" class="btn disabled" href="/auth/login">Connect Gmail (assistant) <span class="pill" id="pill-gmail">not connected</span></a>
+    <a id="connect-cal" class="btn disabled" href="/auth/calendar-login">Connect Calendar (you) <span class="pill" id="pill-cal">not connected</span></a>
+  </div>
+
+  <div id="restart-note" class="banner" style="display:none">
+    ✅ Saved. <strong>Restart the server</strong> for changes to take effect
+    (<code>npm start</code> locally, or redeploy on your host), then reopen <code>/setup</code> to continue.
+  </div>
+</div>
+
+<script>
+const $ = s => document.querySelector(s);
+async function refresh() {
+  try {
+    const r = await fetch("/api/setup/status");
+    const s = await r.json();
+    $("#redirect-uri").textContent = s.redirectUri || "(set after first run)";
+    const f = $("input[name=googleRedirectUri]"); if (f && !f.value) f.placeholder = s.redirectUri || f.placeholder;
+    // Mark which fields already have a saved value
+    document.querySelectorAll("[data-set]").forEach(el => {
+      el.textContent = s.fields && s.fields[el.dataset.set] ? "✓ saved" : "";
+    });
+    // Banner
+    const b = $("#status-banner");
+    if (s.ready && !s.setupMode) { b.className = "banner ok"; b.innerHTML = "✅ Setup complete — your assistant is configured. Visit <a href='/' style='color:var(--gold)'>the dashboard</a>."; }
+    else { b.className = "banner"; b.innerHTML = "⚙️ <strong>Setup in progress.</strong> Still needed: " + (s.missing && s.missing.length ? s.missing.join(", ") : "—"); }
+    // Google connect buttons enable once client ID is saved (needs a restart to be live)
+    const gmailEl = $("#connect-gmail"), calEl = $("#connect-cal");
+    const canConnect = s.fields && s.fields.googleClientId;
+    gmailEl.classList.toggle("disabled", !canConnect);
+    calEl.classList.toggle("disabled", !canConnect);
+    $("#pill-gmail").textContent = s.connected && s.connected.gmail ? "connected" : "not connected";
+    $("#pill-gmail").className = "pill " + (s.connected && s.connected.gmail ? "on" : "");
+    $("#pill-cal").textContent = s.connected && s.connected.calendar ? "connected" : "not connected";
+    $("#pill-cal").className = "pill " + (s.connected && s.connected.calendar ? "on" : "");
+  } catch (e) { $("#status-banner").textContent = "Could not load status: " + e.message; }
+}
+$("#setup-form").addEventListener("submit", async e => {
+  e.preventDefault();
+  const msg = $("#msg"); msg.className = ""; msg.textContent = "Saving…";
+  const data = {};
+  new FormData(e.target).forEach((v, k) => { if (String(v).trim()) data[k] = String(v).trim(); });
+  const headers = { "Content-Type": "application/json" };
+  const pw = $("#auth-pw").value.trim();
+  if (pw) headers["Authorization"] = "Bearer " + pw;
+  try {
+    const r = await fetch("/api/setup", { method: "POST", headers, body: JSON.stringify(data) });
+    const j = await r.json();
+    if (!r.ok) { msg.className = "err"; msg.textContent = j.error || "Save failed."; return; }
+    msg.className = "ok"; msg.textContent = "Saved " + (j.saved || []).length + " field(s).";
+    $("#restart-note").style.display = "block";
+    refresh();
+  } catch (err) { msg.className = "err"; msg.textContent = err.message; }
+});
+refresh();
+</script>
+</body>
+</html>

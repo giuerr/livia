@@ -1,0 +1,27 @@
+# ─── Secrets & per-instance config (NEVER commit) ───────────────────────────
+.env
+setup.json                 # written by the /setup wizard — contains API keys & OAuth tokens
+
+# ─── Runtime data (generated locally / per deployment) ───────────────────────
+active_threads.json
+processed_ids.json
+deploy_fingerprint.json
+contacts.json
+profiles.json
+persistent_rules.json
+scheduled_queue.json
+expenses.json
+rsvp_status.json
+crm_deleted.json
+vault_index.json
+campaigns.json
+vault/
+*.tmp
+
+# ─── Dependencies & tooling ──────────────────────────────────────────────────
+node_modules/
+
+# ─── OS / editor noise ───────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+*.log
