@@ -24,11 +24,22 @@
       ".env.example"
     ]
   },
-  "identity": {
-    "publicKey": "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAMGKNM8CoGWdDwiEyljnbOeF19CsXA1HVk0mZFq5yxsc=\n-----END PUBLIC KEY-----\n",
-    "privateKey": "-----BEGIN PRIVATE KEY-----\nMC4CAQAwBQYDK2VwBCIEIDXUAE1yxKZ7Hdo1yvSnhoTSfPcuPNSB6Hw/D1dcCwN0\n-----END PRIVATE KEY-----\n",
-    "publicKeyB64": "MCowBQYDK2VwAyEA0CdynFy+OTly5L8Jtdo+Ar96izBv384zFadNOX67wPw=",
-    "fingerprint": "39FC:2200:F445:FE9E",
-    "createdAt": "2026-05-26T10:21:55.724Z"
-  }
+  "calibration": {
+    "purpose": "Executive Assistant",
+    "exampleAsks": [
+      "Can you please book Cafe Victor for lunch?"
+    ],
+    "toolsInScope": [],
+    "outOfScope": [
+      "Real-time market trading",
+      "Medical diagnosis advice",
+      "Legal document drafting",
+      "Autonomous system control",
+      "Personal financial planning"
+    ],
+    "audience": "",
+    "difficulty": "foundational"
+  },
+  "calibrationConfirmed": true,
+  "calibrationConfirmedAt": "2026-05-26T10:24:44.309Z"
 }
