@@ -1,0 +1,20 @@
+{
+  "schema": "etna-agent-identity/v1",
+  "agent": {
+    "id": "livia",
+    "name": "livia",
+    "platform": "Agent Etna",
+    "platformUrl": "https://agentsimulator.onrender.com"
+  },
+  "publicKey": {
+    "algorithm": "Ed25519",
+    "pem": "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAMGKNM8CoGWdDwiEyljnbOeF19CsXA1HVk0mZFq5yxsc=\n-----END PUBLIC KEY-----\n",
+    "base64": "MCowBQYDK2VwAyEA0CdynFy+OTly5L8Jtdo+Ar96izBv384zFadNOX67wPw=",
+    "fingerprint": "39FC:2200:F445:FE9E"
+  },
+  "verification": {
+    "url": "https://agentsimulator.onrender.com/verify/livia",
+    "badge": "https://agentsimulator.onrender.com/badge/livia"
+  },
+  "issuedAt": "2026-05-26T10:21:55.751Z"
+}
