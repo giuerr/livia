@@ -1,0 +1,63 @@
+## Livia — Executive Assistant
+##
+## Deploy with Render's Blueprint option, pointed at this repository. Render
+## reads this file and provisions the service; the secrets below are marked
+## sync:false, so it prompts for them rather than expecting them here.
+##
+## The service starts and answers before any of them are set. Without
+## OPENROUTER_API_KEY the reasoning endpoints return ok:false with
+## stopReason "no_llm_key" instead of failing to boot — so a newly created
+## service is visibly alive and merely unconfigured, which is what lets a
+## simulator connect to it while you are still filling in the dashboard.
+##
+## Once deployed, connect Agent Etna with:
+##   LIVIA_URL       https://<this-service>.onrender.com
+##   LIVIA_PASSWORD  whatever you set for AGENT_PASSWORD below
+##
+## Docs: https://render.com/docs/blueprint-spec
+
+services:
+  - type: web
+    name: tabularum-livia
+    runtime: node
+    region: frankfurt          # match your other services to keep latency low
+    plan: starter              # free has cold starts, which read as timeouts
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /health
+
+    envVars:
+      - key: NODE_ENV
+        value: production
+
+      # The model provider. Without it Livia boots and serves /health,
+      # /agent-card and /tools, but cannot think.
+      - key: OPENROUTER_API_KEY
+        sync: false
+
+      # Gates POST /task and POST /chat. Leave it unset and they are OPEN —
+      # an unauthenticated endpoint on a public URL, spending your inference
+      # credit. Set it, and give the same value to Etna as LIVIA_PASSWORD.
+      - key: AGENT_PASSWORD
+        sync: false
+
+      # Needed for this agent's integrations. Absent, those capabilities are
+      # disabled and the rest keeps working.
+      - key: GOOGLE_CLIENT_ID
+        sync: false
+      - key: GOOGLE_CLIENT_SECRET
+        sync: false
+      - key: OWNER_EMAIL
+        sync: false
+      - key: OWNER_EMAILS
+        sync: false
+      - key: OWNER_NAME
+        sync: false
+      - key: LIVIA_EMAIL
+        sync: false
+
+## Optional
+##   ANTHROPIC_API_KEY   fallback provider, used only if OPENROUTER_API_KEY is absent
+##   AGENT_MODEL         override the model (default claude-sonnet-5)
+##   ALLOWED_ORIGINS     comma-separated CORS whitelist
+##   STRICT_ENV=1        fail startup on missing config instead of degrading
