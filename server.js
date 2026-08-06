@@ -1,7 +1,7 @@
 require("dotenv").config();
 const express  = require("express");
 const cors     = require("cors");
-const { google } = require("googleapis");
+const { google } = require("./google-min");
 const Anthropic  = require("@anthropic-ai/sdk");
 const { createLLMClient, activeProvider } = require("./llm-client");
 const path = require("path");
