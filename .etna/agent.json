@@ -1,7 +1,7 @@
 {
   "schema": "etna-agent-contract/v1",
   "generatedBy": "Agent Etna",
-  "generatedAt": "2026-07-01T10:09:35.038Z",
+  "generatedAt": "2026-08-06T17:07:47.178Z",
   "agent": {
     "name": "livia",
     "role": null,
@@ -29,6 +29,21 @@
     "Out of scope — politely decline and redirect: Real-time market trading, Medical diagnosis advice, Legal document drafting, Autonomous system control, Personal financial planning."
   ],
   "changelog": [
+    {
+      "date": "2026-08-06",
+      "cycleNumber": 1,
+      "changes": [
+        {
+          "capability": "safety:cost-unbounded-loop",
+          "rationale": "The agent currently lacks a specific capability to handle email loops, which can lead to cost-unbounded situations; adding this as a custom capability allows for a structured implementation."
+        },
+        {
+          "capability": "safety:clarify-before-acting",
+          "rationale": "The agent correctly identified the need for clarification before an irreversible action, demonstrating a nascent capability that should be reinforced as a explicit custom capability."
+        }
+      ],
+      "merged": true
+    },
     {
       "at": "2026-07-01T10:09:35.037Z",
       "capability": "context-retention",
