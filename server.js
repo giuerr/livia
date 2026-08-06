@@ -3,12 +3,9 @@ const express  = require("express");
 const cors     = require("cors");
 const { google } = require("googleapis");
 const Anthropic  = require("@anthropic-ai/sdk");
-const { createLLMClient, activeProvider } = require("./llm-client");
 const path = require("path");
 const fs   = require("fs");
 const { Document, Packer, Paragraph, TextRun, HeadingLevel, AlignmentType, LevelFormat, BorderStyle } = require("docx");
-const expenseReportEngine = require("./expense-reports");
-const { AGENT_CARD }      = require("./agent-card");
 
 // ─── Logging (declared early — used by OAuth setup and CRM cleanup) ──────────
 let logs = [];
@@ -16,6 +13,35 @@ function addLog(message, type = "info") {
   logs.unshift({ message, type, time: new Date().toISOString() });
   if (logs.length > 300) logs.length = 300;
   console.log(`[${type.toUpperCase()}] ${message}`);
+}
+
+// ─── Persisted settings (BYOK) ───────────────────────────────────────────────
+// On Render, /var/data is the persistent disk mount; locally fall back to cwd.
+// settings.json (gitignored) lets the in-app setup wizard store the deployer's
+// own keys & tokens so they survive restarts — nothing personal is shipped in
+// the repo. Resolution order: persisted setting → environment variable → default.
+const DATA_DIR = fs.existsSync("/var/data") ? "/var/data" : ".";
+if (!fs.existsSync("/var/data")) {
+  console.warn("[⚠️ EPHEMERAL STORAGE] No persistent disk at /var/data — CRM, threads, settings, and all data will be LOST on redeploy. Add a Render Disk mounted at /var/data to preserve data.");
+}
+const SETTINGS_FILE = path.join(DATA_DIR, "settings.json");
+function loadSettings() {
+  try { return JSON.parse(fs.readFileSync(SETTINGS_FILE, "utf-8")); }
+  catch { return {}; }
+}
+let settings = loadSettings();
+function saveSettings(patch) {
+  settings = { ...settings, ...patch };
+  try { fs.writeFileSync(SETTINGS_FILE, JSON.stringify(settings, null, 2)); }
+  catch (e) { console.error("[SETTINGS] save failed:", e.message); }
+  return settings;
+}
+// Resolve a config value: persisted setting wins, then env var, then default.
+function cfg(key, envVar, def = "") {
+  const v = settings[key];
+  if (v !== undefined && v !== null && v !== "") return v;
+  if (envVar && process.env[envVar] !== undefined && process.env[envVar] !== "") return process.env[envVar];
+  return def;
 }
 
 // ─── Simple in-process rate limiter (no extra deps) ───────────────────────────
@@ -69,37 +95,6 @@ app.use(cors({
 
 // ── Body-size limit: prevent oversized JSON payloads ─────────────────────
 app.use(express.json({ limit: "64kb" }));
-
-// ─── Reasoning core ───────────────────────────────────────────────────────────
-//
-// Everything below is a menu: endpoints that act only when a caller already
-// knows which one to call, and with exactly which body. This gives Livia the
-// other half — accept a goal, plan, call her own tools, and work it through.
-//
-// It also publishes the surface every agent shares, so one harness can drive
-// all of them:
-//
-//   GET  /health   GET /agent-card   GET /tools
-//   POST /task     POST /chat        POST /v1/chat/completions
-//
-// Mounted here, ahead of her own routes, because Express gives precedence to
-// whichever handler registered first and the point of these paths is that they
-// behave identically on every agent. The stricter, richer handlers below stay
-// reachable at their own paths.
-const { createMind, mountAgent } = require('./agent-core');
-const { TOOLS, SYSTEM_PROMPT } = require('./tools');
-const guardrails = require('./etna-guardrails');
-
-const mind = createMind({
-  name:         'Livia',
-  systemPrompt: SYSTEM_PROMPT,
-  tools:        TOOLS,
-  guardrails,
-  logger:       (event, detail) => console.log(JSON.stringify({ _type: 'agent_core', event, ...detail })),
-});
-
-mountAgent(app, { mind, agentCard: () => AGENT_CARD });
-
 const PUBLIC_DIR = path.join(__dirname, "public");
 // ── Security headers ───────────────────────────────────────────────────────
 app.use((req, res, next) => {
@@ -123,9 +118,6 @@ app.use((req, res, next) => {
   );
   next();
 });
-// Before setup is complete, send visitors to the wizard instead of the dashboard.
-// Registered ahead of express.static so it intercepts the auto-served index.html.
-app.get("/", (req, res, next) => SETUP_MODE ? res.redirect("/setup") : next());
 app.use(express.static(PUBLIC_DIR));
 
 // ─── Autonomy config ─────────────────────────────────────────────────────────
@@ -164,68 +156,27 @@ function advanceConversationState(email, event) {
   addLog(`🔄 ${profile.name || key}: ${current} → ${next} (${event})`, "info");
 }
 
-// ─── Persisted setup (from the onboarding wizard at /setup) ─────────────────────
-// Read before the identity constants below so a freshly-cloned instance can be
-// configured entirely through the web wizard — no manual .env editing required.
-// Values written by the wizard take precedence over process.env; on first run
-// both are empty and the app boots into SETUP_MODE to serve the wizard.
-const SETUP_DIR  = fs.existsSync("/var/data") ? "/var/data" : ".";
-const SETUP_FILE = path.join(SETUP_DIR, "setup.json");
-function loadSetup() {
-  try { if (fs.existsSync(SETUP_FILE)) return JSON.parse(fs.readFileSync(SETUP_FILE, "utf-8")); }
-  catch (e) { console.warn(`[setup] could not read ${SETUP_FILE}: ${e.message}`); }
-  return {};
-}
-let SETUP = loadSetup();
-// Resolve a value: setup.json key first, then the env var, then the default.
-function setupVal(key, envKey, dflt = "") {
-  const v = SETUP[key];
-  if (v !== undefined && v !== null && v !== "") return v;
-  return (process.env[envKey] !== undefined && process.env[envKey] !== "") ? process.env[envKey] : dflt;
-}
-let SETUP_MODE = false; // set by validateEnv() when required config is missing — serves the wizard instead of exiting
-// Merge updates into setup.json (atomicWrite is hoisted; only called at runtime).
-function saveSetup(updates) {
-  SETUP = { ...SETUP, ...updates };
-  atomicWrite(SETUP_FILE, JSON.stringify(SETUP, null, 2));
-  return SETUP;
-}
-
 // ─── Constants ────────────────────────────────────────────────────────────────
-const OWNER_EMAILS     = setupVal("ownerEmails", "OWNER_EMAILS").split(",").map(e => e.trim().toLowerCase()).filter(Boolean);
-const OWNER_DEFAULT    = setupVal("ownerEmail", "OWNER_EMAIL") || OWNER_EMAILS[0] || "";
-const OWNER_CALENDAR   = setupVal("ownerCalendarEmail", "OWNER_CALENDAR_EMAIL") || OWNER_DEFAULT;
-const OWNER_PHONE      = setupVal("ownerPhone", "OWNER_PHONE");
-const OWNER_NAME       = setupVal("ownerName", "OWNER_NAME") || "the principal";
-const ORG_NAME         = setupVal("orgName", "ORG_NAME");
-// IANA timezone the assistant operates in (scheduling, active hours, time labels). Defaults to UTC.
-const TIMEZONE         = setupVal("timezone", "TIMEZONE") || "UTC";
-// Short label for the timezone (e.g. "CET") shown next to times; derived, falls back to the IANA name.
-function tzLabel() {
-  try { return new Intl.DateTimeFormat("en-GB", { timeZone: TIMEZONE, timeZoneName: "short" }).formatToParts(new Date()).find(p => p.type === "timeZoneName")?.value || TIMEZONE; }
-  catch { return TIMEZONE; }
-}
-const TZ_LABEL = tzLabel();
-const LIVIA_EMAIL      = setupVal("liviaEmail", "LIVIA_EMAIL");
-const LIVIA_NAME       = setupVal("liviaName", "LIVIA_NAME") || "Livia";
-// Google OAuth credentials (wizard or env). Refresh tokens are obtained via /auth/* and persisted to setup.json.
-const GOOGLE_CLIENT_ID       = setupVal("googleClientId", "GOOGLE_CLIENT_ID");
-const GOOGLE_CLIENT_SECRET   = setupVal("googleClientSecret", "GOOGLE_CLIENT_SECRET");
-const GOOGLE_REDIRECT_URI    = setupVal("googleRedirectUri", "GOOGLE_REDIRECT_URI") || `http://localhost:${process.env.PORT || 3000}/auth/callback`;
-const GMAIL_REFRESH_TOKEN    = setupVal("gmailRefreshToken", "GOOGLE_REFRESH_TOKEN");
-const CALENDAR_REFRESH_TOKEN = setupVal("calendarRefreshToken", "GOOGLE_CALENDAR_REFRESH_TOKEN");
+const OWNER_EMAILS     = cfg("ownerEmails", "OWNER_EMAILS").split(",").map(e => e.trim().toLowerCase()).filter(Boolean);
+const OWNER_DEFAULT    = cfg("ownerEmail", "OWNER_EMAIL") || OWNER_EMAILS[0] || "";
+const OWNER_CALENDAR   = cfg("ownerCalendarEmail", "OWNER_CALENDAR_EMAIL") || OWNER_DEFAULT;
+const OWNER_PHONE      = cfg("ownerPhone", "OWNER_PHONE");
+const OWNER_NAME       = cfg("ownerName", "OWNER_NAME") || "the principal";
+const LIVIA_EMAIL      = cfg("liviaEmail", "LIVIA_EMAIL");
+const LIVIA_NAME       = cfg("liviaName", "LIVIA_NAME") || "Livia Drusilla";
+const ORG_NAME         = cfg("orgName", "ORG_NAME");
 const LIVIA_SIGNATURE  = `Kind regards,\n\n${LIVIA_NAME}\nExecutive Assistant to ${OWNER_NAME}`;
 // Messaging style rules — injected into any prompt that generates a chat reply
 const MSG_STYLE = "IMPORTANT: This is a chat message, not an email. Write like a smart, efficient assistant texting her boss. Rules: no greeting (no Hi, Dear, Good morning), no sign-off (no Kind regards, no signature, no Livia), no formal email structure. Just the information, directly. Short sentences. Max 4 sentences unless a summary was explicitly requested. Use line breaks between topics. Emojis sparingly and only where natural.";
-const DASHBOARD_PASSWORD = setupVal("dashboardPassword", "DASHBOARD_PASSWORD");
+let DASHBOARD_PASSWORD = cfg("dashboardPassword", "DASHBOARD_PASSWORD");
 const MAX_BODY_CHARS = 6000;
 const truncate = (s, max = MAX_BODY_CHARS) => s.length > max ? s.slice(0, max) + "\n[… truncated]" : s;
 
 // ─── Telegram Bot ────────────────────────────────────────────────────────────
 // Env: TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID (auto-detected on first message from ${OWNER_NAME})
-const TELEGRAM_ENABLED  = !!process.env.TELEGRAM_BOT_TOKEN;
-const TELEGRAM_TOKEN    = process.env.TELEGRAM_BOT_TOKEN || "";
-let TELEGRAM_CHAT_ID    = process.env.TELEGRAM_CHAT_ID || "";
+let TELEGRAM_TOKEN      = cfg("telegramBotToken", "TELEGRAM_BOT_TOKEN");
+let TELEGRAM_ENABLED    = !!TELEGRAM_TOKEN;
+let TELEGRAM_CHAT_ID    = cfg("telegramChatId", "TELEGRAM_CHAT_ID");
 
 async function sendTelegram(chatId, message) {
   if (!TELEGRAM_ENABLED || !chatId) { addLog(`⚠️ Telegram skipped (not configured): ${message.slice(0, 60)}`, "warning"); return; }
@@ -263,43 +214,35 @@ const GOOGLE_SCOPES = [
   "https://www.googleapis.com/auth/calendar.events",
 ];
 
-// ─── Active hours: 09:00–22:00 in the configured TIMEZONE ─────────────────────
+// ─── Active hours: 09:00–22:00 CET/CEST ──────────────────────────────────────
 function isWithinActiveHours() {
   const romeHour = parseInt(
-    new Intl.DateTimeFormat("en-GB", { timeZone: TIMEZONE, hour: "numeric", hour12: false }).format(new Date()),
+    new Intl.DateTimeFormat("en-GB", { timeZone: "Europe/Rome", hour: "numeric", hour12: false }).format(new Date()),
     10
   );
   return romeHour >= 9 && romeHour < 22;
 }
 
 // ─── Config ───────────────────────────────────────────────────────────────────
-// Render {{PLACEHOLDERS}} in instructions.txt from the configured identity, so the
-// shipped template carries no personal data but reads naturally once set up.
-function renderInstructionTemplate(text) {
-  const map = {
-    OWNER_NAME: OWNER_NAME,
-    OWNER_EMAIL: OWNER_DEFAULT,
-    OWNER_EMAILS: OWNER_EMAILS.join(", "),
-    OWNER_PHONE: OWNER_PHONE,
-    ORG_NAME: ORG_NAME || OWNER_NAME,
-    ASSISTANT_NAME: LIVIA_NAME,
-  };
-  return text.replace(/\{\{\s*(\w+)\s*\}\}/g, (m, k) => (map[k] !== undefined && map[k] !== "" ? map[k] : m));
-}
 function loadInstructions() {
   const f = path.join(__dirname, "instructions.txt");
-  return fs.existsSync(f) ? renderInstructionTemplate(fs.readFileSync(f, "utf-8").trim())
+  let txt = fs.existsSync(f) ? fs.readFileSync(f, "utf-8").trim()
     : `You are ${LIVIA_NAME}, Executive Assistant to ${OWNER_NAME}.`;
+  // The shipped instructions.txt is a template — fill the owner's own details at
+  // runtime so no personal data lives in the repo.
+  const first = (OWNER_NAME && OWNER_NAME !== "the principal") ? (OWNER_NAME.split(" ")[0] || OWNER_NAME) : OWNER_NAME;
+  return txt
+    .replace(/\{\{OWNER_NAME\}\}/g, OWNER_NAME)
+    .replace(/\{\{OWNER_FIRST\}\}/g, first)
+    .replace(/\{\{OWNER_EMAIL\}\}/g, OWNER_DEFAULT || "(owner email not set)")
+    .replace(/\{\{OWNER_PHONE\}\}/g, OWNER_PHONE || "(phone not set)")
+    .replace(/\{\{LIVIA_NAME\}\}/g, LIVIA_NAME);
 }
 
 const config = {
-  // The LLM credential. Named anthropicKey because the setup wizard, the
-  // /api/config contract and setup.json all use that name; the value may now
-  // be an OpenRouter key. setup.json still wins, so a key entered in the
-  // wizard is not overridden by the environment.
-  anthropicKey:        setupVal("anthropicKey", "ANTHROPIC_API_KEY") || process.env.OPENROUTER_API_KEY || "",
+  anthropicKey:        cfg("anthropicKey", "ANTHROPIC_API_KEY"),
   pollIntervalMinutes: parseInt(process.env.POLL_INTERVAL || "1"),
-  isAuthorized:        !!GMAIL_REFRESH_TOKEN,
+  isAuthorized:        !!cfg("googleRefreshToken", "GOOGLE_REFRESH_TOKEN"),
   _baseInstructions:   loadInstructions(),
   get instructions() {
     // Persistent rules learned from ${OWNER_NAME} via email are appended automatically
@@ -316,7 +259,7 @@ const config = {
 function ownerGreeting() {
   const firstName = OWNER_NAME.split(" ")[0] || "there";
   const h = parseInt(
-    new Intl.DateTimeFormat("en-GB", { timeZone: TIMEZONE, hour: "numeric", hour12: false }).format(new Date()),
+    new Intl.DateTimeFormat("en-GB", { timeZone: "Europe/Rome", hour: "numeric", hour12: false }).format(new Date()),
     10
   );
   // Default to English greetings for generic version
@@ -369,28 +312,26 @@ function withRules(snippet) {
 }
 
 // ─── Google (singletons) ──────────────────────────────────────────────────────
+// BYO Google OAuth app: credentials come from the in-app setup wizard or env vars.
+const GOOGLE_CLIENT_ID     = cfg("googleClientId", "GOOGLE_CLIENT_ID");
+const GOOGLE_CLIENT_SECRET = cfg("googleClientSecret", "GOOGLE_CLIENT_SECRET");
+const GOOGLE_REDIRECT_URI  = cfg("googleRedirectUri", "GOOGLE_REDIRECT_URI") || "https://your-app.onrender.com/auth/callback";
+const GOOGLE_REFRESH_TOKEN          = cfg("googleRefreshToken", "GOOGLE_REFRESH_TOKEN");
+const GOOGLE_CALENDAR_REFRESH_TOKEN = cfg("googleCalendarRefreshToken", "GOOGLE_CALENDAR_REFRESH_TOKEN");
 // Gmail OAuth — Livia's account
-const oauth2Client = new google.auth.OAuth2(
-  GOOGLE_CLIENT_ID,
-  GOOGLE_CLIENT_SECRET,
-  GOOGLE_REDIRECT_URI
-);
-if (GMAIL_REFRESH_TOKEN) {
-  oauth2Client.setCredentials({ refresh_token: GMAIL_REFRESH_TOKEN });
+const oauth2Client = new google.auth.OAuth2(GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, GOOGLE_REDIRECT_URI);
+if (GOOGLE_REFRESH_TOKEN) {
+  oauth2Client.setCredentials({ refresh_token: GOOGLE_REFRESH_TOKEN });
 }
 // Calendar OAuth — Owner's account
 // Falls back to Livia's token if not yet configured
-const calendarOAuth2Client = new google.auth.OAuth2(
-  GOOGLE_CLIENT_ID,
-  GOOGLE_CLIENT_SECRET,
-  GOOGLE_REDIRECT_URI
-);
-if (CALENDAR_REFRESH_TOKEN) {
-  calendarOAuth2Client.setCredentials({ refresh_token: CALENDAR_REFRESH_TOKEN });
-} else if (GMAIL_REFRESH_TOKEN) {
+const calendarOAuth2Client = new google.auth.OAuth2(GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, GOOGLE_REDIRECT_URI);
+if (GOOGLE_CALENDAR_REFRESH_TOKEN) {
+  calendarOAuth2Client.setCredentials({ refresh_token: GOOGLE_CALENDAR_REFRESH_TOKEN });
+} else if (GOOGLE_REFRESH_TOKEN) {
   // Fallback: use Livia's token until the owner's is configured
-  calendarOAuth2Client.setCredentials({ refresh_token: GMAIL_REFRESH_TOKEN });
-  addLog("⚠️ GOOGLE_CALENDAR_REFRESH_TOKEN not set — using Livia's token for calendar (organizer will show as Livia)", "warning");
+  calendarOAuth2Client.setCredentials({ refresh_token: GOOGLE_REFRESH_TOKEN });
+  addLog("⚠️ Calendar token not set — using Livia's token for calendar (organizer will show as Livia)", "warning");
 }
 // Monitor token events — alert on auth errors so Livia doesn't stop silently
 oauth2Client.on("tokens", (tokens) => {
@@ -408,32 +349,17 @@ calendarOAuth2Client.on("tokens", (tokens) => {
 const gmail    = google.gmail({ version: "v1", auth: oauth2Client });
 const calendar = google.calendar({ version: "v3", auth: calendarOAuth2Client });
 
-// ─── LLM singleton (rebuilt only when the API key changes) ────────────────────
-//
-// Model traffic goes through OpenRouter when OPENROUTER_API_KEY is set, and to
-// Anthropic directly otherwise. The client speaks the Anthropic Messages shape
-// either way, so the call sites below are unchanged.
-//
-// The cached key is tracked separately rather than read back off the client:
-// the OpenRouter client exposes no .apiKey, so comparing against it would
-// rebuild on every call.
+// ─── Anthropic singleton (rebuilt only when the API key changes) ──────────────
 let _anthropic = null;
-let _anthropicKey = null;
 function getAnthropic() {
-  if (!_anthropic || _anthropicKey !== config.anthropicKey) {
-    _anthropic = createLLMClient({ apiKey: config.anthropicKey });
-    _anthropicKey = config.anthropicKey;
+  if (!_anthropic || _anthropic.apiKey !== config.anthropicKey) {
+    _anthropic = new Anthropic({ apiKey: config.anthropicKey });
   }
   return _anthropic;
 }
 
 // ─── State files ──────────────────────────────────────────────────────────────
-// On Render, /var/data is the persistent disk mount path.
-// Locally (no persistent disk), fall back to the working directory.
-const DATA_DIR = fs.existsSync("/var/data") ? "/var/data" : ".";
-if (!fs.existsSync("/var/data")) {
-  console.warn("[⚠️ EPHEMERAL STORAGE] No persistent disk at /var/data — CRM, threads, and all data will be LOST on redeploy. Add a Render Disk mounted at /var/data to preserve data.");
-}
+// DATA_DIR + persistent-storage warning are defined near the top (settings block).
 const THREADS_FILE            = path.join(DATA_DIR, "active_threads.json");
 const PROCESSED_IDS_FILE      = path.join(DATA_DIR, "processed_ids.json");
 const DEPLOY_FINGERPRINT_FILE = path.join(DATA_DIR, "deploy_fingerprint.json");
@@ -442,7 +368,6 @@ const PROFILES_FILE           = path.join(DATA_DIR, "profiles.json");   // never
 const RULES_FILE              = path.join(DATA_DIR, "persistent_rules.json"); // never wiped
 const SCHEDULED_QUEUE_FILE    = path.join(DATA_DIR, "scheduled_queue.json");   // never wiped
 const EXPENSES_FILE           = path.join(DATA_DIR, "expenses.json");           // never wiped
-const EXPENSE_REPORTS_FILE    = path.join(DATA_DIR, "expense_reports.json");    // never wiped — trip claims
 const RSVP_FILE               = path.join(DATA_DIR, "rsvp_status.json");         // never wiped — tracks last-known attendee RSVP states
 const CRM_DELETED_FILE        = path.join(DATA_DIR, "crm_deleted.json");         // never wiped — manually deleted profiles
 const VAULT_DIR               = path.join(DATA_DIR, "vault");                    // file vault — attachments from Telegram/email
@@ -496,7 +421,6 @@ let profiles            = loadJSON(PROFILES_FILE, {}); // { "email": { ...CRM pr
 let persistentRules     = loadJSON(RULES_FILE, []);    // [{ rule, addedAt }] — instructions from ${OWNER_NAME}
 let scheduledQueue      = loadJSON(SCHEDULED_QUEUE_FILE, []); // [{ sendAt, to, subject, body, addedAt }]
 let expenses            = loadJSON(EXPENSES_FILE, []);
-let expenseReports      = loadJSON(EXPENSE_REPORTS_FILE, []); // [{ id, purpose, lineItems, status, ... }]
 let rsvpStatus          = loadJSON(RSVP_FILE, {}); // { "eventId": { "email": "accepted"|"declined"|"tentative"|"needsAction" } }
 let crmDeleted          = new Set(loadJSON(CRM_DELETED_FILE, [])); // emails manually removed — never re-create
 let vaultIndex          = loadJSON(VAULT_INDEX_FILE, []);          // [{ id, filename, mimeType, size, savedAt, source, caption }]
@@ -535,7 +459,6 @@ function saveProfiles() { if (_saveProfilesTimer) clearTimeout(_saveProfilesTime
 function saveRules()          { try { atomicWrite(RULES_FILE, JSON.stringify(persistentRules, null, 2)); } catch (e) { console.error(e.message); } }
 function saveScheduledQueue() { try { atomicWrite(SCHEDULED_QUEUE_FILE, JSON.stringify(scheduledQueue, null, 2)); } catch (e) { console.error(e.message); } }
 function saveExpenses()       { try { atomicWrite(EXPENSES_FILE, JSON.stringify(expenses, null, 2)); } catch (e) { console.error(e.message); } }
-function saveExpenseReports() { try { atomicWrite(EXPENSE_REPORTS_FILE, JSON.stringify(expenseReports, null, 2)); } catch (e) { console.error(e.message); } }
 function saveRsvpStatus()     { try { atomicWrite(RSVP_FILE, JSON.stringify(rsvpStatus, null, 2)); } catch (e) { console.error(e.message); } }
 function saveCrmDeleted()     { try { atomicWrite(CRM_DELETED_FILE, JSON.stringify([...crmDeleted])); } catch (e) { console.error(e.message); } }
 function saveVaultIndex()     { try { atomicWrite(VAULT_INDEX_FILE, JSON.stringify(vaultIndex, null, 2)); } catch (e) { console.error(e.message); } }
@@ -656,13 +579,64 @@ function safeCompare(a, b) {
   }
   return crypto.timingSafeEqual(Buffer.from(a), Buffer.from(b));
 }
+// ── GitHub-login sessions (signed, httpOnly cookie — no extra deps) ───────────
+function githubLoginConfigured() {
+  return !!(cfg("githubClientId", "GITHUB_CLIENT_ID") && cfg("githubClientSecret", "GITHUB_CLIENT_SECRET"));
+}
+function sessionSecret() {
+  let s = settings.sessionSecret || process.env.SESSION_SECRET;
+  if (!s) { s = crypto.randomBytes(32).toString("hex"); saveSettings({ sessionSecret: s }); }
+  return s;
+}
+function signSession(payload) {
+  const body = Buffer.from(JSON.stringify(payload)).toString("base64url");
+  const sig  = crypto.createHmac("sha256", sessionSecret()).update(body).digest("base64url");
+  return `${body}.${sig}`;
+}
+function verifySession(token) {
+  if (typeof token !== "string" || !token.includes(".")) return null;
+  const [body, sig] = token.split(".");
+  const expected = crypto.createHmac("sha256", sessionSecret()).update(body).digest("base64url");
+  if (!safeCompare(sig, expected)) return null;
+  try {
+    const payload = JSON.parse(Buffer.from(body, "base64url").toString("utf-8"));
+    if (payload.exp && Date.now() > payload.exp) return null;
+    return payload;
+  } catch { return null; }
+}
+function parseCookies(req) {
+  const out = {};
+  (req.headers.cookie || "").split(";").forEach(c => {
+    const i = c.indexOf("="); if (i < 0) return;
+    out[c.slice(0, i).trim()] = decodeURIComponent(c.slice(i + 1).trim());
+  });
+  return out;
+}
+function sessionUser(req) {
+  const t = parseCookies(req).livia_session;
+  return t ? verifySession(t) : null;
+}
+function baseUrl(req) {
+  return process.env.RENDER_EXTERNAL_URL || process.env.BASE_URL || cfg("baseUrl", "BASE_URL") || `${req.protocol}://${req.get("host")}`;
+}
+function loginErrPage(msg) {
+  const safe = String(msg).replace(/[<>&]/g, "");
+  return `<html><body style="font-family:monospace;padding:40px;background:#1a1714;color:#f5f0e8;"><p style="color:#e07070">${safe}</p><p><a href="/" style="color:#b8965a">← Back</a></p></body></html>`;
+}
+
 function requireAuth(req, res, next) {
-  if (!DASHBOARD_PASSWORD) {
-    // No password set — block all API access to prevent open dashboard exposure
-    return res.status(403).json({ error: "Dashboard is not secured. Set DASHBOARD_PASSWORD in environment variables." });
+  // 1) Valid GitHub-login session cookie
+  if (sessionUser(req)) return next();
+  // 2) Dashboard password (Bearer token)
+  if (DASHBOARD_PASSWORD) {
+    const token = (req.headers["authorization"] || "").replace(/^Bearer\s+/i, "").trim();
+    return safeCompare(token, DASHBOARD_PASSWORD) ? next() : res.status(401).json({ error: "Unauthorized" });
   }
-  const token = (req.headers["authorization"] || "").replace(/^Bearer\s+/i, "").trim();
-  return safeCompare(token, DASHBOARD_PASSWORD) ? next() : res.status(401).json({ error: "Unauthorized" });
+  // 3) Setup mode: nothing secures the instance yet — allow so the owner can run
+  //    first-run setup. The UI nags them to secure it immediately.
+  if (!githubLoginConfigured()) return next();
+  // 4) GitHub login is configured but there's no valid session → must sign in.
+  return res.status(401).json({ error: "Unauthorized" });
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -856,7 +830,7 @@ async function enrichProfile(email, { name, direction, subject, body }) {
       `Return ONLY valid JSON with these fields (use null if unknown):\n` +
       `{\n` +
       `  "name": "full name if found (e.g. John Michael Smith)",\n` +
-      `  "firstName": "first name only (e.g. Alex)",\n` +
+      `  "firstName": "first name only (e.g. Salvatore)",\n` +
       `  "company": "company or organisation",\n` +
       `  "role": "job title or role",\n` +
       `  "phone": "phone number if found in signature or body, with country code, or null",\n` +
@@ -1429,35 +1403,8 @@ async function askClaude(prompt, maxTokens = 1024, retries = 2, model = MODEL_CA
     }
   }
 }
-// web_search_20250305 is a server-side tool: Anthropic runs the search itself
-// and there is no equivalent in the OpenAI-compatible shape OpenRouter serves.
-// Forwarding it would produce a function tool nothing executes — the model
-// would "call" it, get no result, and answer from memory while still appearing
-// to have searched. So this one capability keeps a direct Anthropic client
-// whenever an Anthropic key is available, and degrades openly when it is not.
-let _searchClient = null;
-function getWebSearchClient() {
-  const key = process.env.ANTHROPIC_API_KEY;
-  if (!key) return null;
-  if (!_searchClient) _searchClient = new Anthropic({ apiKey: key });
-  return _searchClient;
-}
-
 async function askClaudeWithWebSearch(prompt, { maxTokens = 4096, model = MODEL_CAPABLE } = {}) {
-  const search = getWebSearchClient();
-
-  if (!search) {
-    // No Anthropic key: answer without live search rather than silently
-    // pretending to have searched. The prompt says so, so the model can
-    // caveat its answer instead of stating stale facts with confidence.
-    addLog("⚠️ Web search unavailable — no ANTHROPIC_API_KEY. Answering without live results.", "warning");
-    return askClaude(
-      `${prompt}\n\nNOTE: You have no web access for this request. Answer from what you already know and say plainly which parts you could not verify.`,
-      maxTokens, 2, model,
-    );
-  }
-
-  const res = await search.messages.create({
+  const res = await getAnthropic().messages.create({
     model, max_tokens: maxTokens,
     system: INJECTION_GUARD_SYSTEM,
     tools: [{ type: "web_search_20250305", name: "web_search" }],
@@ -1623,7 +1570,7 @@ function meetingExtraInfo(t, calendarLink) {
 }
 async function parseTime(timeStr) {
   const raw = await askClaude(
-    `Parse this meeting time into ISO 8601, assuming ${TIMEZONE} timezone.\n${wrapUntrusted(timeStr)}\nToday: ${new Date().toISOString().split("T")[0]}\nDefault duration: 30 minutes unless specified.\nReturn ONLY valid JSON: {"start":"2026-03-15T10:00:00","end":"2026-03-15T10:30:00"}`,
+    `Parse this meeting time into ISO 8601, assuming Europe/Rome timezone.\n${wrapUntrusted(timeStr)}\nToday: ${new Date().toISOString().split("T")[0]}\nDefault duration: 30 minutes unless specified.\nReturn ONLY valid JSON: {"start":"2026-03-15T10:00:00","end":"2026-03-15T10:30:00"}`,
     80, 1, MODEL_HAIKU
   );
   const parsed = parseJSON(raw);
@@ -1633,7 +1580,7 @@ async function parseTime(timeStr) {
 }
 async function createCalendarEvent({ summary, startDateTime, endDateTime, attendees, description, isPhoneCall, isInPerson, isGoogleMeet, location }) {
   const useMeet = isGoogleMeet === true || (!isPhoneCall && !isInPerson);
-  const event = { summary, description, start: { dateTime: startDateTime, timeZone: TIMEZONE }, end: { dateTime: endDateTime, timeZone: TIMEZONE }, attendees: attendees.map(email => ({ email })), reminders: { useDefault: true } };
+  const event = { summary, description, start: { dateTime: startDateTime, timeZone: "Europe/Rome" }, end: { dateTime: endDateTime, timeZone: "Europe/Rome" }, attendees: attendees.map(email => ({ email })), reminders: { useDefault: true } };
   if (isInPerson && location) event.location = location;
   if (useMeet) event.conferenceData = { createRequest: { requestId: `livia-${Date.now()}`, conferenceSolutionKey: { type: "hangoutsMeet" } } };
   const res = await calendar.events.insert({ calendarId: "primary", requestBody: event, conferenceDataVersion: useMeet ? 1 : 0, sendUpdates: "all" });
@@ -1641,7 +1588,7 @@ async function createCalendarEvent({ summary, startDateTime, endDateTime, attend
   return res.data;
 }
 async function updateCalendarEvent({ eventId, startDateTime, endDateTime }) {
-  const res = await calendar.events.patch({ calendarId: "primary", eventId, sendUpdates: "all", requestBody: { start: { dateTime: startDateTime, timeZone: TIMEZONE }, end: { dateTime: endDateTime, timeZone: TIMEZONE } } });
+  const res = await calendar.events.patch({ calendarId: "primary", eventId, sendUpdates: "all", requestBody: { start: { dateTime: startDateTime, timeZone: "Europe/Rome" }, end: { dateTime: endDateTime, timeZone: "Europe/Rome" } } });
   addLog(`📅 Calendar event updated`, "success");
   return res.data;
 }
@@ -1690,7 +1637,7 @@ function formatCalendarEvents(events) {
   return events.map(e => {
     const start = e.start?.dateTime || e.start?.date || "?";
     const startFmt = start.includes("T")
-      ? new Date(start).toLocaleString("en-GB", { weekday: "short", day: "numeric", month: "short", hour: "2-digit", minute: "2-digit", timeZone: TIMEZONE })
+      ? new Date(start).toLocaleString("en-GB", { weekday: "short", day: "numeric", month: "short", hour: "2-digit", minute: "2-digit", timeZone: "Europe/Rome" })
       : start;
     const attendeeRsvp = formatAttendeeRSVP(e.attendees);
     const ownerRsvp = formatOwnerRSVP(e.attendees);
@@ -1756,15 +1703,15 @@ async function findFreeSlots(durationMinutes = 60, daysAhead = 7) {
     cursor.setMinutes(Math.ceil(cursor.getMinutes() / 30) * 30, 0, 0);
 
     while (freeSlots.length < 5 && cursor < end) {
-      const romeHour = parseInt(new Intl.DateTimeFormat("en-GB", { timeZone: TIMEZONE, hour: "numeric", hour12: false }).format(cursor), 10);
-      const romeDay  = new Intl.DateTimeFormat("en-GB", { timeZone: TIMEZONE, weekday: "short" }).format(cursor);
+      const romeHour = parseInt(new Intl.DateTimeFormat("en-GB", { timeZone: "Europe/Rome", hour: "numeric", hour12: false }).format(cursor), 10);
+      const romeDay  = new Intl.DateTimeFormat("en-GB", { timeZone: "Europe/Rome", weekday: "short" }).format(cursor);
 
       if (["Sat", "Sun"].includes(romeDay)) { cursor.setDate(cursor.getDate() + 1); cursor.setHours(9, 0, 0, 0); continue; }
       if (romeHour < 9)  { cursor.setHours(9, 0, 0, 0); continue; }
       if (romeHour >= 18) { cursor.setDate(cursor.getDate() + 1); cursor.setHours(9, 0, 0, 0); continue; }
 
       const slotEnd = new Date(cursor.getTime() + durationMinutes * 60 * 1000);
-      const slotEndHour = parseInt(new Intl.DateTimeFormat("en-GB", { timeZone: TIMEZONE, hour: "numeric", hour12: false }).format(slotEnd), 10);
+      const slotEndHour = parseInt(new Intl.DateTimeFormat("en-GB", { timeZone: "Europe/Rome", hour: "numeric", hour12: false }).format(slotEnd), 10);
       if (slotEndHour > 18) { cursor.setDate(cursor.getDate() + 1); cursor.setHours(9, 0, 0, 0); continue; }
 
       const clash = busyIntervals.some(b => cursor < b.end && slotEnd > b.start);
@@ -1772,7 +1719,7 @@ async function findFreeSlots(durationMinutes = 60, daysAhead = 7) {
         freeSlots.push({
           start: new Date(cursor),
           end:   new Date(slotEnd),
-          label: cursor.toLocaleString("en-GB", { weekday: "long", day: "numeric", month: "short", hour: "2-digit", minute: "2-digit", timeZone: TIMEZONE }) + " " + TZ_LABEL,
+          label: cursor.toLocaleString("en-GB", { weekday: "long", day: "numeric", month: "short", hour: "2-digit", minute: "2-digit", timeZone: "Europe/Rome" }) + " CET",
         });
         cursor.setTime(slotEnd.getTime());
       } else {
@@ -1797,7 +1744,7 @@ async function findCCSchedulingSlots(thirdPartyTz = "CET") {
     const DURATION = 20; // minutes
 
     // CET window (hour range) per timezone — chosen so other party gets 09:00–20:00 local
-    // the owner's hard flexibility: 09:30–21:00 in their timezone
+    // Jane's hard flexibility: 09:30–21:00 CET
     const TZ_WINDOWS = {
       CET:   { start: 9,  end: 15 },   // 09:30–15:00 CET → 09:30–15:00 for them
       ET:    { start: 15, end: 21 },   // 15:00–21:00 CET → 09:00–15:00 ET (UTC-6/-5)
@@ -1812,7 +1759,7 @@ async function findCCSchedulingSlots(thirdPartyTz = "CET") {
       let added = 0;
       while (added < days) {
         d.setDate(d.getDate() + 1);
-        const day = new Intl.DateTimeFormat("en-GB", { timeZone: TIMEZONE, weekday: "short" }).format(d);
+        const day = new Intl.DateTimeFormat("en-GB", { timeZone: "Europe/Rome", weekday: "short" }).format(d);
         if (!["Sat", "Sun"].includes(day)) added++;
       }
       return d;
@@ -1837,34 +1784,48 @@ async function findCCSchedulingSlots(thirdPartyTz = "CET") {
       let found = false;
       for (let h = window.start; h < window.end && !found; h++) {
         for (let m = 0; m < 60 && !found; m += 30) {
-          // Build the candidate at h:m in the configured timezone, then convert to UTC:
-          // treat the wall-clock time as UTC, measure how far that lands from h in
-          // TIMEZONE, and shift by that offset.
-          const tzDateStr = new Intl.DateTimeFormat("en-CA", { timeZone: TIMEZONE }).format(targetDay);
-          const testDate = new Date(`${tzDateStr}T${String(h).padStart(2,"0")}:${String(m).padStart(2,"0")}:00Z`);
-          const tzHourCheck = parseInt(new Intl.DateTimeFormat("en-GB", { timeZone: TIMEZONE, hour: "numeric", hour12: false }).format(testDate), 10);
-          const offsetHours = h - tzHourCheck;
+          // Set candidate in Rome time
+          const candidate = new Date(targetDay);
+          // We set UTC hours such that Rome time = h:m
+          // Use a simple approach: set date to target day, then find the UTC equivalent
+          const romeDateStr = new Intl.DateTimeFormat("en-CA", { timeZone: "Europe/Rome" }).format(targetDay);
+          const candidateRome = new Date(`${romeDateStr}T${String(h).padStart(2,"0")}:${String(m).padStart(2,"0")}:00`);
+          // Convert Rome local to UTC
+          const romeOffset = new Date(candidateRome.toLocaleString("en-US", { timeZone: "Europe/Rome" }));
+          const utcCandidate = new Date(candidateRome.getTime() - (romeOffset.getTime() - candidateRome.getTime()));
+
+          // Simpler: use Intl to get the UTC time for a given Rome local time
+          // Build a date string in Rome TZ and parse it
+          const isoStr = `${romeDateStr}T${String(h).padStart(2,"0")}:${String(m).padStart(2,"0")}:00`;
+          const slotStart = new Date(new Date(isoStr).toLocaleString("en-US", { timeZone: "UTC" }));
+
+          // Actually the cleanest way: build as if it's UTC, then adjust by Rome offset
+          // Rome is UTC+1 (winter) or UTC+2 (summer)
+          const testDate = new Date(`${romeDateStr}T${String(h).padStart(2,"0")}:${String(m).padStart(2,"0")}:00Z`);
+          const romeHourCheck = parseInt(new Intl.DateTimeFormat("en-GB", { timeZone: "Europe/Rome", hour: "numeric", hour12: false }).format(testDate), 10);
+          // Adjust until Rome hour matches h
+          const offsetHours = h - romeHourCheck;
           const slotStartUTC = new Date(testDate.getTime() - offsetHours * 3600000);
           const slotEndUTC   = new Date(slotStartUTC.getTime() + DURATION * 60000);
 
-          // Skip if outside the owner's absolute window (09:30–21:00 in their timezone)
-          const ownerHour = parseInt(new Intl.DateTimeFormat("en-GB", { timeZone: TIMEZONE, hour: "numeric", hour12: false }).format(slotStartUTC), 10);
-          const ownerMin  = parseInt(new Intl.DateTimeFormat("en-GB", { timeZone: TIMEZONE, minute: "numeric" }).format(slotStartUTC), 10);
-          if (ownerHour < 9 || (ownerHour === 9 && ownerMin < 30)) continue;
-          if (ownerHour >= 21) continue;
+          // Skip if outside Jane's absolute window (09:30–21:00 CET)
+          const actualRomeHour = parseInt(new Intl.DateTimeFormat("en-GB", { timeZone: "Europe/Rome", hour: "numeric", hour12: false }).format(slotStartUTC), 10);
+          const actualRomeMin  = parseInt(new Intl.DateTimeFormat("en-GB", { timeZone: "Europe/Rome", minute: "numeric" }).format(slotStartUTC), 10);
+          if (actualRomeHour < 9 || (actualRomeHour === 9 && actualRomeMin < 30)) continue;
+          if (actualRomeHour >= 21) continue;
 
           // Check for clash
           const clash = busyIntervals.some(b => slotStartUTC < b.end && slotEndUTC > b.start);
           if (!clash) {
-            const ownerLabel = slotStartUTC.toLocaleString("en-GB", { weekday: "long", day: "numeric", month: "short", hour: "2-digit", minute: "2-digit", timeZone: TIMEZONE }) + " " + TZ_LABEL;
-            // Also show the time in the other party's timezone
-            const partyAbbr = { CET: "CET", ET: "ET", PT: "PT", OTHER: "" }[thirdPartyTz] || "";
-            const partyTz   = { CET: TIMEZONE, ET: "America/New_York", PT: "America/Los_Angeles", OTHER: "UTC" }[thirdPartyTz] || "UTC";
-            const localLabel = partyAbbr ? slotStartUTC.toLocaleString("en-GB", { hour: "2-digit", minute: "2-digit", timeZone: partyTz }) + ` ${partyAbbr}` : "";
+            const cetLabel   = slotStartUTC.toLocaleString("en-GB", { weekday: "long", day: "numeric", month: "short", hour: "2-digit", minute: "2-digit", timeZone: "Europe/Rome" }) + " CET";
+            // Also show local time for the other party
+            const tzLabel = { CET: "CET", ET: "ET", PT: "PT", OTHER: "" }[thirdPartyTz] || "";
+            const localTz  = { CET: "Europe/Rome", ET: "America/New_York", PT: "America/Los_Angeles", OTHER: "UTC" }[thirdPartyTz] || "UTC";
+            const localLabel = tzLabel ? slotStartUTC.toLocaleString("en-GB", { hour: "2-digit", minute: "2-digit", timeZone: localTz }) + ` ${tzLabel}` : "";
             slots.push({
               start: slotStartUTC,
               end:   slotEndUTC,
-              label: ownerLabel + (localLabel ? ` (${localLabel})` : ""),
+              label: cetLabel + (localLabel ? ` (${localLabel})` : ""),
             });
             found = true;
           }
@@ -1903,7 +1864,7 @@ async function checkCalendarRSVPs() {
         const prevStatus = prev[email];
         if (prevStatus && prevStatus !== status) {
           const name = a.displayName || email.split("@")[0];
-          const startFmt = new Date(ev.start?.dateTime || ev.start?.date).toLocaleString("en-GB", { weekday: "short", day: "numeric", month: "short", hour: "2-digit", minute: "2-digit", timeZone: TIMEZONE });
+          const startFmt = new Date(ev.start?.dateTime || ev.start?.date).toLocaleString("en-GB", { weekday: "short", day: "numeric", month: "short", hour: "2-digit", minute: "2-digit", timeZone: "Europe/Rome" });
           changes.push({ name, email, from: prevStatus, to: status, event: ev.summary || "(no title)", time: startFmt, eventId: ev.id });
         }
       }
@@ -1951,7 +1912,7 @@ async function bookConfirmedMeeting(t, confirmedTime) {
       if (existing.length) {
         const conflictList = existing.map(e => {
           const s = e.start?.dateTime || e.start?.date || "";
-          const startFmt = s.includes("T") ? new Date(s).toLocaleString("en-GB", { weekday: "short", day: "numeric", month: "short", hour: "2-digit", minute: "2-digit", timeZone: TIMEZONE }) : s;
+          const startFmt = s.includes("T") ? new Date(s).toLocaleString("en-GB", { weekday: "short", day: "numeric", month: "short", hour: "2-digit", minute: "2-digit", timeZone: "Europe/Rome" }) : s;
           return `"${e.summary || "(no title)"}" at ${startFmt}`;
         }).join(", ");
         addLog(`⚠️ Conflict detected when booking with ${calDisplayName}: ${conflictList}`, "warning");
@@ -2024,18 +1985,18 @@ Task types — choose carefully:
 - LOOKUP: find a specific piece of information and report back (e.g. email, phone number, address). Quick factual lookups only — do NOT use RESEARCH or BOOKING for these.
 - QUERY: The owner is asking about his own emails, inbox, sent messages, or past activity (e.g. "has X emailed me?", "did I hear back from Y?", "what did Z say?"). Use this whenever the question is about email history or correspondence status.
 - CALENDAR_QUERY: The owner is asking about his calendar, schedule, or meetings (e.g. "how many meetings do I have with X?", "what's in my diary this week?", "am I free on Thursday?", "how many times have I met Y?"). Use this whenever the question is about calendar events, availability, or meeting counts.
-- RESCHEDULE_MEETING: update/move an existing calendar event to a new time directly in the calendar. Use when ${OWNER_NAME} says to move/update the invite itself (e.g. "reschedule my meeting with Alex to Thursday 3pm").
+- RESCHEDULE_MEETING: update/move an existing calendar event to a new time directly in the calendar. Use when ${OWNER_NAME} says to move/update the invite itself (e.g. "reschedule my meeting with Salvatore to Thursday 3pm").
 - REACH_OUT_RESCHEDULE: contact someone to ask if they can move their meeting to a new time. Use when ${OWNER_NAME} says "reach out to X asking to move to Y" or "ask Cornelius if he can do next Monday instead". Use "body" for the proposed new time, "recipients" for the person.
-- CANCEL_MEETING: cancel and delete an existing calendar event. Use when the owner asks to cancel or delete a meeting invite (e.g. "cancel the invite with Alex on Monday", "delete the meeting with X").
+- CANCEL_MEETING: cancel and delete an existing calendar event. Use when the owner asks to cancel or delete a meeting invite (e.g. "cancel the invite with Salvatore on Monday", "delete the meeting with X").
 - EMAIL_DIGEST: ${OWNER_NAME} wants a summary of recent unread or important emails in his inbox. Use when he asks "what emails have I missed?", "what's in my inbox?", "any important emails today?", "catch me up on emails".
 - EXPENSE_SUMMARY: ${OWNER_NAME} wants a summary of logged expenses/invoices. Use when he asks "what invoices have come in?", "show me expenses", "what have I been charged?", "expense report".
 - DAILY_SUMMARY: ${OWNER_NAME} wants a summary of what Livia has done today and what is scheduled in the next 24 hours. Use when he asks things like "what have you done today?", "give me a daily summary", "what's on for the next 24 hours?", "summary of today's activity".
 - OUTREACH_SUMMARY: ${OWNER_NAME} wants a full status update including done and cancelled threads. Use when the owner asks things like "who have you reached out to?", "what's the status of your outreach?", "summarise the people you contacted", "give me an update on the meetings", "show me all threads including past ones". Do NOT use for "what are the active threads" or "list the active threads" — those go to THREAD_MANAGEMENT.
 - CANCEL_OUTREACH: cancel/abort one or more active outreach threads. Use when ${OWNER_NAME} says "cancel the outreach to X", "stop the scheduling with Y", "forget about the meeting with Z". Use "recipients" for the person's name/email. Use "body" for any note.
 - THREAD_MANAGEMENT: list or delete ACTIVE threads only (excludes done/cancelled). Use when ${OWNER_NAME} asks things like: "what are the active threads", "list the active threads", "show me the threads", "show me what's active", "what threads do you have open", "delete all threads", "delete all except thread 7", "delete all of them except 7", "delete threads 1, 3, 5", "cancel all except for 7", "clear all threads except 2", "remove thread 3". Use "body" to capture the full instruction (e.g. "list", "delete all", "delete all except 7"). This task type ALWAYS handles any request to list or delete threads by number. CRITICAL: "what are the active threads" = THREAD_MANAGEMENT, NOT OUTREACH_SUMMARY.
-- SET_TONE: ${OWNER_NAME} wants to set a specific tone or style for emails to a particular contact (e.g. "always write formally to Taylor", "use a casual tone with Alex", "write to Jordan as if they are a close friend"). Use "recipients" for the contact, "body" for the tone description.
-- REMEMBER: ${OWNER_NAME} wants Livia to permanently remember a rule or preference (e.g. "Livia, always check with me before accepting meetings with X", "remember that Jordan prefers morning calls", "from now on always cc me when writing to Y"). Store the rule exactly as stated.
-- SCHEDULED_SEND: send an email at a specific future time or date (e.g. "send this to X at 20:30 today", "email Y tomorrow at 9am"). Use "body" for the email content/instructions, "note" for the scheduled time (e.g. "20:30 today", "tomorrow 9am"), and "recipients" for the target.
+- SET_TONE: ${OWNER_NAME} wants to set a specific tone or style for emails to a particular contact (e.g. "always write formally to Salvatore", "use a casual tone with Marco", "write to Angelica as if she is a close friend"). Use "recipients" for the contact, "body" for the tone description.
+- REMEMBER: ${OWNER_NAME} wants Livia to permanently remember a rule or preference (e.g. "Livia, always check with me before accepting meetings with X", "remember that Marco prefers morning calls", "from now on always cc me when writing to Y"). Store the rule exactly as stated.
+- SCHEDULED_SEND: send an email at a specific future time or date (e.g. "send this to X at 20:30 today", "email Y tomorrow at 9am"). Use "body" for the email content/instructions, "note" for the scheduled time (e.g. "20:30 CET today", "tomorrow 9am"), and "recipients" for the target.
 - SEND_FILE: ${OWNER_NAME} wants to send a file/document/deck/attachment that he previously shared with Livia (via Telegram or email) to someone. Use "recipients" for the target, "note" for which file to send (filename or description), "body" for any accompanying message.
 - PIPELINE_SUMMARY: ${OWNER_NAME} wants to see the deal pipeline, deal status, or investment pipeline. Trigger phrases include: "show me the pipeline", "what's in the pipeline", "deal status", "pipeline summary", "where are my deals", "investor pipeline".
 - CREATE_CAMPAIGN: ${OWNER_NAME} wants to start an outreach campaign to multiple people about a topic. Trigger phrases include: "start an outreach campaign to", "run a campaign", "mass outreach to", "reach out to all of them about". Use "body" for the campaign topic/message template, "recipients" for the contacts, "note" for campaign name.
@@ -2055,7 +2016,7 @@ Rules:
 - LOOKUP vs RESEARCH: LOOKUP is a quick fact; RESEARCH is a full written report.
 - RESCHEDULE_MEETING: use "body" for the new time (e.g. "Thursday 3pm"), "recipients" with the person's name/email, "note" for any extra context.
 - CANCEL_MEETING: use "recipients" with the person's name/email, "body" for any time hint (e.g. "Monday", "the one this week"), "note" for extra context. If ${OWNER_NAME} says "cancel all except one" or "cancel all but the X one", set "body" to "ALL_EXCEPT" and "note" to describe which one to KEEP (e.g. "keep the Monday 3pm one", "keep the earliest one").
-- A single message can contain MULTIPLE tasks — e.g. "reschedule Alex to Thursday AND cancel the Monday invite" = two separate tasks: RESCHEDULE_MEETING + CANCEL_MEETING.
+- A single message can contain MULTIPLE tasks — e.g. "reschedule Salvatore to Thursday AND cancel the Monday invite" = two separate tasks: RESCHEDULE_MEETING + CANCEL_MEETING.
 
 Subject: ${subject}
 Message: ${wrapUntrusted(truncate(body, 4000))}
@@ -2263,7 +2224,7 @@ async function findEventForAction(recipientName, recipientEmail, timeHint, gmail
     // Ask Claude to identify the right event from the cache
     const cacheList = cache.map((e, i) => {
       const startFmt = e.start.includes("T")
-        ? new Date(e.start).toLocaleString("en-GB", { weekday: "short", day: "numeric", month: "short", hour: "2-digit", minute: "2-digit", timeZone: TIMEZONE })
+        ? new Date(e.start).toLocaleString("en-GB", { weekday: "short", day: "numeric", month: "short", hour: "2-digit", minute: "2-digit", timeZone: "Europe/Rome" })
         : e.start;
       const attendees = (e.attendees || []).map(a => a.name || a.email).join(", ");
       return `[${i}] ${startFmt} — "${e.summary}"${attendees ? " with " + attendees : ""}`;
@@ -2296,7 +2257,7 @@ async function findEventForAction(recipientName, recipientEmail, timeHint, gmail
     // Multiple — ask Claude to pick the right one
     const list = events.map((e, i) => {
       const startFmt = (e.start?.dateTime || e.start?.date || "").includes("T")
-        ? new Date(e.start.dateTime).toLocaleString("en-GB", { weekday: "short", day: "numeric", month: "short", hour: "2-digit", minute: "2-digit", timeZone: TIMEZONE })
+        ? new Date(e.start.dateTime).toLocaleString("en-GB", { weekday: "short", day: "numeric", month: "short", hour: "2-digit", minute: "2-digit", timeZone: "Europe/Rome" })
         : (e.start?.date || "");
       return `[${i}] ${startFmt} — "${e.summary || ""}"`;
     }).join("\n");
@@ -2339,7 +2300,7 @@ async function executeTask(task, { fromAddress, subject: origSubject, body: orig
     // ── Draft/confirm gate — show the owner all outbound drafts before sending ──
     // Only applies when NOT already executing a confirmed draft (task._confirmed flag).
     // EXCEPTION: skip the gate if all 3 details are present — recipient email, meeting format, and slots.
-    // In that case the owner has provided everything Livia needs and confirmation is not required.
+    // In that case Jane has provided everything Livia needs and confirmation is not required.
     const hasRecipientEmail = recipients.every(r => sanitiseRecipient(r.email));
     const hasMeetingFormat  = task.note && /phone|call|meet|google\s*meet|in[\s-]?person|video/i.test(task.note + " " + (task.body || ""));
     const hasTimeSlots      = task.body && /\b(\d{1,2}[:\.]\d{2}|\d{1,2}\s*(?:am|pm)|monday|tuesday|wednesday|thursday|friday|tomorrow|next\s+week|jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\b/i.test(task.body);
@@ -2487,7 +2448,7 @@ async function executeTask(task, { fromAddress, subject: origSubject, body: orig
           if (existing.length) {
             const conflictList = existing.map(e => {
               const s = e.start?.dateTime || e.start?.date || "";
-              const startFmt = s.includes("T") ? new Date(s).toLocaleString("en-GB", { weekday: "short", day: "numeric", month: "short", hour: "2-digit", minute: "2-digit", timeZone: TIMEZONE }) : s;
+              const startFmt = s.includes("T") ? new Date(s).toLocaleString("en-GB", { weekday: "short", day: "numeric", month: "short", hour: "2-digit", minute: "2-digit", timeZone: "Europe/Rome" }) : s;
               return `"${e.summary || "(no title)"}" at ${startFmt}`;
             }).join(", ");
             addLog(`⚠️ Conflict detected for direct invite with ${calDisplayName}: ${conflictList}`, "warning");
@@ -2508,7 +2469,7 @@ async function executeTask(task, { fromAddress, subject: origSubject, body: orig
         sentTo.push(calDisplayName);
         addLog(`📅 Direct invite booked: ${OWNER_NAME.split(" ")[0]} // ${calDisplayName}`, "success");
 
-        const timeFmt = new Date(times.start).toLocaleString("en-GB", { weekday: "long", day: "numeric", month: "short", hour: "2-digit", minute: "2-digit", timeZone: TIMEZONE });
+        const timeFmt = new Date(times.start).toLocaleString("en-GB", { weekday: "long", day: "numeric", month: "short", hour: "2-digit", minute: "2-digit", timeZone: "Europe/Rome" });
         await sendEmail({ to: fromAddress, subject: `Re: ${origSubject}`, body: `${ownerGreeting()}\n\nDone — calendar invite sent to ${calDisplayName} for ${timeFmt}.${calendarLink ? " Meet link: " + calendarLink : ""}\n\n${LIVIA_SIGNATURE}`, threadId: gmailThreadId, inReplyTo: messageId, references: messageId });
         if (TELEGRAM_ENABLED && TELEGRAM_CHAT_ID) await sendTelegram(TELEGRAM_CHAT_ID, `📅 Done — invite sent to ${calDisplayName} for ${timeFmt}.${calendarLink ? "\n" + calendarLink : ""}`).catch(() => {});
       } catch (e) {
@@ -2717,7 +2678,7 @@ ${SNIPPET_SCHEDULING}\n\nWrite a short, warm email to ${name} on behalf of ${OWN
       try {
         const ev = await calendar.events.get({ calendarId: "primary", eventId });
         const s = ev.data.start?.dateTime || ev.data.start?.date || "";
-        currentTimeStr = s.includes("T") ? new Date(s).toLocaleString("en-GB", { weekday: "long", day: "numeric", month: "long", hour: "2-digit", minute: "2-digit", timeZone: TIMEZONE }) : s;
+        currentTimeStr = s.includes("T") ? new Date(s).toLocaleString("en-GB", { weekday: "long", day: "numeric", month: "long", hour: "2-digit", minute: "2-digit", timeZone: "Europe/Rome" }) : s;
       } catch { /* non-fatal */ }
     }
 
@@ -2877,7 +2838,7 @@ ${lines}`;
     const todayLogs = logs
       .filter(l => new Date(l.time) >= startOfToday)
       .slice(0, 80)
-      .map(l => `[${new Date(l.time).toLocaleTimeString("en-GB", { timeZone: TIMEZONE, hour: "2-digit", minute: "2-digit" })}] ${l.message}`)
+      .map(l => `[${new Date(l.time).toLocaleTimeString("en-GB", { timeZone: "Europe/Rome", hour: "2-digit", minute: "2-digit" })}] ${l.message}`)
       .reverse() // chronological order
       .join("\n") || "No activity recorded today yet.";
 
@@ -2906,7 +2867,7 @@ ${lines}`;
     const in24h = new Date(now.getTime() + 24 * 60 * 60 * 1000);
     const upcomingSends = scheduledQueue
       .filter(item => new Date(item.sendAt) <= in24h)
-      .map(item => `• Email to ${item.toName || item.to} scheduled at ${new Date(item.sendAt).toLocaleString("en-GB", { timeZone: TIMEZONE, hour: "2-digit", minute: "2-digit", day: "2-digit", month: "short" })}`)
+      .map(item => `• Email to ${item.toName || item.to} scheduled at ${new Date(item.sendAt).toLocaleString("en-GB", { timeZone: "Europe/Rome", hour: "2-digit", minute: "2-digit", day: "2-digit", month: "short" })}`)
       .join("\n") || "None.";
 
     // ── Calendar: next 24 hours ──────────────────────────────────────────────
@@ -2928,7 +2889,7 @@ ${lines}`;
     const summary = await askClaude(
       `You are ${LIVIA_NAME}, PA to ${OWNER_NAME}. Write a clear, natural daily activity summary.\n\n` +
       `Today is ${now.toLocaleDateString("en-GB", { weekday: "long", day: "numeric", month: "long", year: "numeric" })}. ` +
-      `Current time: ${now.toLocaleTimeString("en-GB", { timeZone: TIMEZONE, hour: "2-digit", minute: "2-digit" })} ${TZ_LABEL}.\n\n` +
+      `Current time: ${now.toLocaleTimeString("en-GB", { timeZone: "Europe/Rome", hour: "2-digit", minute: "2-digit" })} CET.\n\n` +
       `=== TODAY'S ACTIVITY LOG ===\n${todayLogs}\n\n` +
       `=== MEETINGS BOOKED TODAY ===\n${completedToday}\n\n` +
       `=== PENDING THREADS (awaiting replies) ===\n${pendingThreads}\n\n` +
@@ -3121,7 +3082,7 @@ ${LIVIA_SIGNATURE}`, threadId: gmailThreadId, inReplyTo: messageId, references: 
     let eventDateParsed = null;
     if (eventDate) {
       try {
-        const timeRaw = await askClaude(`Parse this event date into an ISO 8601 datetime, assuming ${TIMEZONE} timezone.\nDate: ${wrapUntrusted(eventDate)}\nToday: ${now.toISOString()}\nReturn ONLY the ISO string.`, 40, 1, MODEL_HAIKU);
+        const timeRaw = await askClaude(`Parse this event date into an ISO 8601 datetime, assuming Europe/Rome (CET/CEST) timezone.\nDate: ${wrapUntrusted(eventDate)}\nToday: ${now.toISOString()}\nReturn ONLY the ISO string.`, 40, 1, MODEL_HAIKU);
         eventDateParsed = new Date(timeRaw.trim());
         if (isNaN(eventDateParsed.getTime())) eventDateParsed = null;
       } catch { /* non-fatal */ }
@@ -3342,7 +3303,7 @@ ${LIVIA_SIGNATURE}`, threadId: gmailThreadId, inReplyTo: messageId, references: 
 
     // Parse the scheduled time from task.note using Claude
     const timeRaw = await askClaude(
-      `Parse this scheduled send time into an ISO 8601 datetime, assuming ${TIMEZONE} timezone.\nTime: ${wrapUntrusted(task.note || "")}\nToday: ${new Date().toISOString()}\nReturn ONLY the ISO string, e.g. 2026-03-16T20:30:00+01:00`,
+      `Parse this scheduled send time into an ISO 8601 datetime, assuming Europe/Rome (CET/CEST) timezone.\nTime: ${wrapUntrusted(task.note || "")}\nToday: ${new Date().toISOString()}\nReturn ONLY the ISO string, e.g. 2026-03-16T20:30:00+01:00`,
       40, 1, MODEL_HAIKU
     );
     const sendAt = new Date(timeRaw.trim());
@@ -3359,11 +3320,11 @@ ${LIVIA_SIGNATURE}`, threadId: gmailThreadId, inReplyTo: messageId, references: 
 
     scheduledQueue.push({ sendAt: sendAt.toISOString(), to: toEmail, toName, subject: emailSubject, body: drafted, addedAt: new Date().toISOString() });
     saveScheduledQueue();
-    addLog(`⏰ Scheduled send queued: ${toEmail} at ${sendAt.toLocaleString("en-GB", { timeZone: TIMEZONE })}`, "success");
-    if (TELEGRAM_ENABLED && TELEGRAM_CHAT_ID) await sendTelegram(TELEGRAM_CHAT_ID, `⏰ Scheduled — will send to ${toName} at ${sendAt.toLocaleString("en-GB", { timeZone: TIMEZONE, hour: "2-digit", minute: "2-digit", day: "2-digit", month: "short" })} ${TZ_LABEL}.`).catch(() => {});
+    addLog(`⏰ Scheduled send queued: ${toEmail} at ${sendAt.toLocaleString("en-GB", { timeZone: "Europe/Rome" })}`, "success");
+    if (TELEGRAM_ENABLED && TELEGRAM_CHAT_ID) await sendTelegram(TELEGRAM_CHAT_ID, `⏰ Scheduled — will send to ${toName} at ${sendAt.toLocaleString("en-GB", { timeZone: "Europe/Rome", hour: "2-digit", minute: "2-digit", day: "2-digit", month: "short" })} CET.`).catch(() => {});
     await sendEmail({ to: fromAddress, subject: `Re: ${origSubject}`, body: `${ownerGreeting()}
 
-Scheduled — I'll send the email to ${toName} at ${sendAt.toLocaleString("en-GB", { timeZone: TIMEZONE, hour: "2-digit", minute: "2-digit", day: "2-digit", month: "short" })} ${TZ_LABEL}.
+Scheduled — I'll send the email to ${toName} at ${sendAt.toLocaleString("en-GB", { timeZone: "Europe/Rome", hour: "2-digit", minute: "2-digit", day: "2-digit", month: "short" })} CET.
 
 ${LIVIA_SIGNATURE}`, threadId: gmailThreadId, inReplyTo: messageId, references: messageId });
     return { ok: true, detail: `scheduled send queued for ${toEmail} at ${sendAt.toISOString()}` };
@@ -3530,7 +3491,7 @@ ${LIVIA_SIGNATURE}`, threadId: gmailThreadId, inReplyTo: messageId, references: 
         const relThread = Object.entries(activeThreads).find(([, t]) => t.calendarEventId === ev.id);
         if (relThread) saveThread(relThread[0], { ...relThread[1], stage: "cancelled" });
         addLog(`🗑️ Cancelled: "${ev.summary}"`, "success");
-        const cancelledFmt = new Date(ev.start?.dateTime || ev.start?.date).toLocaleString("en-GB", { weekday: "short", day: "numeric", month: "short", hour: "2-digit", minute: "2-digit", timeZone: TIMEZONE });
+        const cancelledFmt = new Date(ev.start?.dateTime || ev.start?.date).toLocaleString("en-GB", { weekday: "short", day: "numeric", month: "short", hour: "2-digit", minute: "2-digit", timeZone: "Europe/Rome" });
         await sendEmail({ to: fromAddress, subject: `Re: ${origSubject}`, body: `${ownerGreeting()}\n\nDone — I've cancelled the meeting "${ev.summary}" on ${cancelledFmt}.\n\n${LIVIA_SIGNATURE}`, threadId: gmailThreadId, inReplyTo: messageId, references: messageId });
         if (TELEGRAM_ENABLED && TELEGRAM_CHAT_ID) {
           await sendTelegram(TELEGRAM_CHAT_ID, `🗑️ Cancelled: "${ev.summary}" on ${cancelledFmt}`).catch(() => {});
@@ -3546,7 +3507,7 @@ ${LIVIA_SIGNATURE}`, threadId: gmailThreadId, inReplyTo: messageId, references: 
     const eventList = candidateEvents.map((e, i) => {
       const start = e.start?.dateTime || e.start?.date || "?";
       const startFmt = start.includes("T")
-        ? new Date(start).toLocaleString("en-GB", { weekday: "short", day: "numeric", month: "short", hour: "2-digit", minute: "2-digit", timeZone: TIMEZONE })
+        ? new Date(start).toLocaleString("en-GB", { weekday: "short", day: "numeric", month: "short", hour: "2-digit", minute: "2-digit", timeZone: "Europe/Rome" })
         : start;
       return `[${i}] ${startFmt} — ${e.summary || "(no title)"}`;
     }).join("\n");
@@ -3586,7 +3547,7 @@ ${LIVIA_SIGNATURE}`, threadId: gmailThreadId, inReplyTo: messageId, references: 
         const relThread = Object.entries(activeThreads).find(([, t]) => t.calendarEventId === ev.id);
         if (relThread) saveThread(relThread[0], { ...relThread[1], stage: "cancelled" });
         const start = ev.start?.dateTime || ev.start?.date || "?";
-        const startFmt = start.includes("T") ? new Date(start).toLocaleString("en-GB", { weekday: "short", day: "numeric", month: "short", hour: "2-digit", minute: "2-digit", timeZone: TIMEZONE }) : start;
+        const startFmt = start.includes("T") ? new Date(start).toLocaleString("en-GB", { weekday: "short", day: "numeric", month: "short", hour: "2-digit", minute: "2-digit", timeZone: "Europe/Rome" }) : start;
         cancelled.push(`"${ev.summary}" on ${startFmt}`);
         addLog(`🗑️ Cancelled: "${ev.summary}"`, "success");
       } catch (e) {
@@ -3597,7 +3558,7 @@ ${LIVIA_SIGNATURE}`, threadId: gmailThreadId, inReplyTo: messageId, references: 
 
     const keptEvents = candidateEvents.filter((_, i) => !toCancel.includes(i));
     const keptLine = keptEvents.length
-      ? `\n\nKept: ${keptEvents.map(e => { const s = e.start?.dateTime || e.start?.date || "?"; return `"${e.summary}" on ${s.includes("T") ? new Date(s).toLocaleString("en-GB", { weekday: "short", day: "numeric", month: "short", hour: "2-digit", minute: "2-digit", timeZone: TIMEZONE }) : s}`; }).join(", ")}.`
+      ? `\n\nKept: ${keptEvents.map(e => { const s = e.start?.dateTime || e.start?.date || "?"; return `"${e.summary}" on ${s.includes("T") ? new Date(s).toLocaleString("en-GB", { weekday: "short", day: "numeric", month: "short", hour: "2-digit", minute: "2-digit", timeZone: "Europe/Rome" }) : s}`; }).join(", ")}.`
       : "";
     const summary = cancelled.length
       ? `${ownerGreeting()}\n\nDone — I've cancelled ${cancelled.length} meeting${cancelled.length > 1 ? "s" : ""} with ${recipientName || "them"}:\n${cancelled.map(c => `- ${c}`).join("\n")}${keptLine}${failed.length ? `\n\nCould not cancel: ${failed.join(", ")}` : ""}\n\n${LIVIA_SIGNATURE}`
@@ -3626,7 +3587,7 @@ ${LIVIA_SIGNATURE}`, threadId: gmailThreadId, inReplyTo: messageId, references: 
 async function handleOwnerInstruction({ fromAddress, subject, body, messageId, gmailThreadId, attachments = [], attachmentParts = [], ownerLang = "English", threadContext = "" }) {
   // Guard: if there is already an active scheduling thread for a person mentioned in this message,
   // do not re-trigger BOOK_MEETING — instead route back to the scheduling flow.
-  // This prevents duplicate outreach when the owner sends a follow-up on an active thread.
+  // This prevents duplicate outreach when Jane sends a follow-up on an active thread.
   const activeScheduling = Object.values(activeThreads).filter(t =>
     t.taskType === "BOOK_MEETING" &&
     t.stage !== "done" && t.stage !== "cancelled"
@@ -4068,7 +4029,7 @@ async function handleMessage(message, { withinHours = true } = {}) {
       // Before classifying this as a new instruction, check if it relates to any
       // active scheduling thread — regardless of thread ID or subject line.
       // We use Claude to match, so even a completely fresh email ("yes go ahead
-      // with Alex") gets correctly linked to the right thread.
+      // with Salvatore") gets correctly linked to the right thread.
       const activeSchedulingThreads = Object.entries(activeThreads).filter(
         ([, t]) => t.stage !== "done" && t.stage !== "cancelled" &&
                    (t.stage === "waiting_for_slots" || t.stage === "waiting_for_owner_confirmation" || t.stage === "waiting_for_confirmation")
@@ -4344,7 +4305,7 @@ ${SNIPPET_SCHEDULING}${tpHint}\n\n${OWNER_NAME} has offered these time slots: ${
       const desc         = isMultiple ? `${tpNames.join(", ")} (${thirdPartyEmails.join(", ")})` : `${primaryName} (${primaryEmail})`;
 
       // Use the third party's profile language if known, otherwise detect from the email
-      // Important: ${OWNER_NAME}'s language ≠ the language to use with Alex
+      // Important: ${OWNER_NAME}'s language ≠ the language to use with Salvatore
       const tpLang = profiles[primaryEmail]?.language || threadLanguage;
 
       const ccIntent = await askClaude(`Was this email CCing Livia to schedule a meeting or find a time to speak with the people copied?\nSubject: ${wrapUntrusted(subject)}\nBody: ${wrapUntrusted(truncate(body, 600))}\nReply YES or NO.`, 10, 1, MODEL_HAIKU);
@@ -4361,7 +4322,7 @@ ${SNIPPET_SCHEDULING}${tpHint}\n\n${OWNER_NAME} has offered these time slots: ${
           const tpSig = await localSig(tpLang);
           const slotEmailBody = await askClaude(
             `${withRules(SNIPPET_DRAFT)}\n\n` +
-            `You are ${LIVIA_NAME}, Personal Assistant to ${OWNER_NAME}.\n` +
+            `You are Livia Drusilla, Personal Assistant to ${OWNER_NAME}.\n` +
             `${OWNER_NAME} has introduced you to ${primaryName} and asked you to find a time for them to speak.\n` +
             `Write a short, warm, professional email to ${primaryName} proposing these 3 specific time slots for a 20-minute call:\n\n${slots}\n\n` +
             `Mention that ${OWNER_NAME} will be joining the call. Ask ${primaryName} to confirm which slot works best.\n` +
@@ -4400,7 +4361,7 @@ ${SNIPPET_SCHEDULING}${tpHint}\n\n${OWNER_NAME} has offered these time slots: ${
             detectedTimezone: thirdPartyTz,
           });
           addLog(`✅ Sent 3 slots directly to ${primaryName} (${thirdPartyTz}) — ${OWNER_NAME} in CC`, "success");
-          // Notify the owner by email AND Telegram about what was just sent on his behalf
+          // Notify Jane by email AND Telegram about what was just sent on his behalf
           const ccNotifyBody = `${ownerGreeting()}\n\nI've reached out to ${primaryName} with 3 time slots on your behalf:\n\n${slots}\n\nI'll let you know as soon as they reply.\n\n${LIVIA_SIGNATURE}`;
           await sendEmail({ to: safeOwnerEmail(fromAddress), subject: `Slots sent to ${primaryName}`, body: ccNotifyBody }).catch(() => {});
           if (TELEGRAM_ENABLED && TELEGRAM_CHAT_ID) {
@@ -4558,7 +4519,7 @@ ${SNIPPET_SCHEDULING}${tpHint}\n\n${OWNER_NAME} has offered these time slots: ${
       const cantMakeIt = await askClaude(`Write a short, warm email saying no problem and that you'll check with ${OWNER_NAME} and come back with alternative times.\nOpening: ${tThread.isMultiple ? "Hi all," : `Hi ${tThread.thirdPartyFirstName},`}\nWrite in ${lang}\nClosing: ${sig}\nWrite email body only`, 300, 1, MODEL_FAST);
       await sendEmail({ to: tThread.thirdPartyEmails?.join(", ") || tThread.thirdPartyEmail, subject: `Re: ${tThread.originalSubject}`, body: cantMakeIt, threadId: gmailThreadId, inReplyTo: messageId, references: messageId });
 
-      // If slots were already auto-offered (CC flow or triggeredByOwner), don't ask the owner again —
+      // If slots were already auto-offered (CC flow or triggeredByOwner), don't ask Jane again —
       // automatically find new slots and propose them directly
       if ((tThread.ownerConfirmed || tThread.triggeredByOwner) && tThread.slotsOffered) {
         addLog(`🔄 Auto-proposing new slots (previous slots declined by ${tThread.thirdPartyFirstName})`, "info");
@@ -4569,7 +4530,7 @@ ${SNIPPET_SCHEDULING}${tpHint}\n\n${OWNER_NAME} has offered these time slots: ${
             const tpLang2 = sanitiseLang(tThread.thirdPartyLanguage || threadLanguage);
             const tpSig2  = await localSig(tpLang2);
             const retry   = await askClaude(
-              `${withRules(SNIPPET_DRAFT)}\n\nYou are ${LIVIA_NAME}, PA to ${OWNER_NAME}.\n` +
+              `${withRules(SNIPPET_DRAFT)}\n\nYou are Livia Drusilla, PA to ${OWNER_NAME}.\n` +
               `The previous times didn't work for ${tThread.thirdPartyFirstName}. Propose these new slots:\n\n${newSlots}\n\n` +
               `Keep it brief and warm. Opening: Hi ${tThread.thirdPartyFirstName},\nWrite in ${tpLang2}.\nClosing: ${tpSig2}\nWrite email body only.`,
               300, 1, MODEL_FAST
@@ -4585,7 +4546,7 @@ ${SNIPPET_SCHEDULING}${tpHint}\n\n${OWNER_NAME} has offered these time slots: ${
         } catch (e) { addLog(`⚠️ Auto re-slot failed: ${e.message}`, "warning"); }
       }
 
-      // Fallback: ask the owner for alternatives
+      // Fallback: ask Jane for alternatives
       await sendEmail({ to: safeOwnerEmail(tThread.ownerEmail || OWNER_DEFAULT), subject: `Re: ${tThread.originalSubject}`, body: `${ownerGreeting()}\n\nThe proposed times don't work for ${tThread.thirdPartyFirstName}. When else are you available?\n\n${LIVIA_SIGNATURE}`, threadId: tThread.ownerGmailThreadId || undefined });
       saveThread(tThreadId, { ...updatedTThread, stage: "waiting_for_slots", thirdPartyConfirmed: false });
       if (updatedTThread?.telegramOrigin && TELEGRAM_ENABLED && TELEGRAM_CHAT_ID) {
@@ -4756,7 +4717,7 @@ ${LIVIA_SIGNATURE}`,
     } catch {}
 
     // Save thread state — if they proposed a time, we're waiting for ${OWNER_NAME}'s confirmation
-    // not waiting for slots. This is the key fix for the proposed-time/11am scenario.
+    // not waiting for slots. This is the key fix for the Alex/11am scenario.
     const gEmailForMeeting = profiles[fromAddress.toLowerCase()]?.lastOwnerEmail || OWNER_DEFAULT;
     const initialStage = hasTimes ? "waiting_for_owner_confirmation" : "waiting_for_slots";
     saveThread(gmailThreadId, { stage: initialStage, thirdPartyEmail: fromAddress, thirdPartyFirstName: fromName, originalSubject: subject, lastThirdPartyMessageId: messageId, thirdPartyGmailThreadId: gmailThreadId, ownerEmail: gEmailForMeeting, isFirstContact: true, triggeredByThirdParty: true, suggestedTimes: timesText, thirdPartyConfirmedTime: timesText, language: threadLanguage, thirdPartyLanguage: threadLanguage, thirdPartyConfirmed: hasTimes });
@@ -4860,14 +4821,14 @@ let isFetching = false; // prevents concurrent poll runs
 async function fetchNewEmails() {
   if (isFetching) { addLog("⏭️ Poll skipped — previous run still in progress", "info"); return; }
   if (!config.isAuthorized) { addLog("⚠️ Not authorized — visit /auth/login", "warning"); return; }
-  if (!config.anthropicKey) { addLog("⚠️ LLM API key missing — set OPENROUTER_API_KEY", "warning"); return; }
+  if (!config.anthropicKey) { addLog("⚠️ Anthropic API key missing", "warning"); return; }
   isFetching = true;
   try {
 
   const withinHours = isWithinActiveHours();
   if (!withinHours) {
     // Outside hours: still poll and classify, but suppress outbound sends
-    addLog(`🌙 Outside active hours (09:00–22:00 ${TZ_LABEL}) — read-only mode`);
+    addLog(`🌙 Outside active hours (09:00–22:00 CET) — read-only mode`);
   }
 
   const since = freshDeploy ? SERVER_START_UNIX : (resumeAfterUnix || Math.floor((Date.now() - 24 * 60 * 60 * 1000) / 1000));
@@ -4963,7 +4924,7 @@ async function sendMorningBriefing() {
       return d >= startOfDay && d <= endOfDay;
     });
     const scheduledText = todayScheduled.length
-      ? todayScheduled.map(s => `• Email to ${s.toName || s.to} at ${new Date(s.sendAt).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", timeZone: TIMEZONE })}`).join("\n")
+      ? todayScheduled.map(s => `• Email to ${s.toName || s.to} at ${new Date(s.sendAt).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", timeZone: "Europe/Rome" })}`).join("\n")
       : "None.";
 
     // ── Persistent rules ─────────────────────────────────────────────────────
@@ -4975,7 +4936,7 @@ async function sendMorningBriefing() {
     const todayEventLines = todayEvents.map(e => {
       const start = e.start?.dateTime || e.start?.date;
       const timeFmt = start?.includes("T")
-        ? new Date(start).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", timeZone: TIMEZONE })
+        ? new Date(start).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", timeZone: "Europe/Rome" })
         : "all-day";
       const attendeeRsvp = formatAttendeeRSVP(e.attendees);
       return `${timeFmt} — ${e.summary || "(no title)"}${attendeeRsvp ? " with " + attendeeRsvp : ""}`;
@@ -4984,7 +4945,7 @@ async function sendMorningBriefing() {
     const tomorrowEventLines = tomorrowEvents.map(e => {
       const start = e.start?.dateTime || e.start?.date;
       const timeFmt = start?.includes("T")
-        ? new Date(start).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", timeZone: TIMEZONE })
+        ? new Date(start).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", timeZone: "Europe/Rome" })
         : "all-day";
       const attendeeRsvp = formatAttendeeRSVP(e.attendees);
       return `${timeFmt} — ${e.summary || "(no title)"}${attendeeRsvp ? " with " + attendeeRsvp : ""}`;
@@ -5104,12 +5065,12 @@ let lastChaseDate    = null;
 function scheduleJobs() {
   setInterval(async () => {
     const now      = new Date();
-    const romeTime = new Intl.DateTimeFormat("en-GB", { timeZone: TIMEZONE, hour: "numeric", minute: "numeric", hour12: false }).format(now);
+    const romeTime = new Intl.DateTimeFormat("en-GB", { timeZone: "Europe/Rome", hour: "numeric", minute: "numeric", hour12: false }).format(now);
     const [romeHour, romeMin] = romeTime.split(":").map(Number);
     const today    = now.toDateString();
 
-    // Weekly expense digest — Monday at 08:00 local time
-    const romeWeekday = new Intl.DateTimeFormat("en-GB", { timeZone: TIMEZONE, weekday: "short" }).format(now);
+    // Weekly expense digest — Monday at 08:00 Rome time
+    const romeWeekday = new Intl.DateTimeFormat("en-GB", { timeZone: "Europe/Rome", weekday: "short" }).format(now);
     if (romeWeekday === "Mon" && romeHour === 8 && romeMin === 0) {
       const lastWeek = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
       const weekExpenses = expenses.filter(e => new Date(e.date) >= lastWeek);
@@ -5133,19 +5094,19 @@ ${LIVIA_SIGNATURE}`,
       }
     }
 
-    // Morning gatekeeper at 07:30 local time, once per day
+    // Morning gatekeeper at 07:30 Rome time, once per day
     if (romeHour === 7 && romeMin >= 30 && romeMin < 31 && lastBriefingDate !== today) {
       lastBriefingDate = today;
       await sendMorningBriefing().catch(e => addLog(`❌ Briefing scheduler error: ${e.message}`, "error"));
     }
 
-    // Stale thread chase at 10:00 local time, once per day
+    // Stale thread chase at 10:00 Rome time, once per day
     if (romeHour === 10 && romeMin === 0 && lastChaseDate !== today) {
       lastChaseDate = today;
       await chaseStaleThreads().catch(e => addLog(`❌ Chase scheduler error: ${e.message}`, "error"));
     }
 
-    // ── Conversation state decay — once daily at 08:00 local time ───────────
+    // ── Conversation state decay — once daily at 08:00 Rome time ───────────
     if (romeHour === 8 && romeMin === 0 && (!scheduleJobs._lastDecayDate || scheduleJobs._lastDecayDate !== today)) {
       if (romeHour === 8 && romeMin === 0) {
         scheduleJobs._lastDecayDate = today;
@@ -5190,7 +5151,7 @@ ${LIVIA_SIGNATURE}`,
           .filter(a => !isOwner(a.email) && a.email.toLowerCase() !== LIVIA_EMAIL.toLowerCase())
           .map(a => a.email);
         if (!attendees.length) continue; // skip solo events
-        const startFmt = new Date(ev.start?.dateTime || ev.start?.date).toLocaleString("en-GB", { weekday: "short", hour: "2-digit", minute: "2-digit", timeZone: TIMEZONE });
+        const startFmt = new Date(ev.start?.dateTime || ev.start?.date).toLocaleString("en-GB", { weekday: "short", hour: "2-digit", minute: "2-digit", timeZone: "Europe/Rome" });
         // Build context from Gmail history and profiles
         const contextParts = [];
         for (const email of attendees.slice(0, 3)) {
@@ -5330,7 +5291,7 @@ ${msgs.join("\n")}
       saveScheduledQueue();
     }
 
-    // ── Weekly digest — Friday at 17:00 local time ────────────────────────────
+    // ── Weekly digest — Friday at 17:00 Rome time ────────────────────────────
     if (romeWeekday === "Fri" && romeHour === 17 && romeMin === 0 && scheduleJobs._lastWeeklyDigest !== today) {
       scheduleJobs._lastWeeklyDigest = today;
       try {
@@ -5402,7 +5363,7 @@ ${msgs.join("\n")}
       } catch (e) { addLog(`⚠️ Weekly digest error: ${e.message}`, "warning"); }
     }
 
-    // ── Auto follow-up reminders — daily at 09:00 local time ──────────────────
+    // ── Auto follow-up reminders — daily at 09:00 Rome time ──────────────────
     if (romeHour === 9 && romeMin === 0 && scheduleJobs._lastFollowUpDate !== today) {
       scheduleJobs._lastFollowUpDate = today;
       try {
@@ -5432,7 +5393,7 @@ ${msgs.join("\n")}
     }
 
   }, 60_000).unref();
-  addLog("⏰ Scheduled jobs active (gatekeeper 07:30, chase 10:00 local time)", "info");
+  addLog("⏰ Scheduled jobs active (gatekeeper 07:30, chase 10:00 Rome time)", "info");
 }
 
 // ─── Polling ──────────────────────────────────────────────────────────────────
@@ -5541,7 +5502,7 @@ function getChatContext() {
 // replyFn(message): sends the reply back to ${OWNER_NAME} via the correct channel
 async function handleInboundMessage(body, replyFn) {
   // ── Cancel / change-of-mind detection ───────────────────────────────────
-  // If the owner says "forget it", "ignore that", "actually...", "never mind" etc.
+  // If Jane says "forget it", "ignore that", "actually...", "never mind" etc.
   // clear the chat history so Livia starts fresh with no prior context bleeding in.
   const isMindChange = /^(forget\s+(it|that|everything)|ignore\s+that|never\s+mind|cancel\s+that|scrap\s+that|actually[,.]?\s+(?:forget|ignore|no|cancel|scratch)|scratch\s+that|disregard\s+that|start\s+fresh|start\s+over|new\s+task|skip\s+that)\b/i.test(body.trim());
   if (isMindChange) {
@@ -5714,7 +5675,7 @@ async function handleInboundMessage(body, replyFn) {
   }
 
   // ── Pre-process quoted content ───────────────────────────────────────────
-  // If the owner writes: 'send an email saying "thank you"' or 'email Sam: "see you soon"'
+  // If Jane writes: 'send an email saying "ti amo"' or 'email Alex: "I love you"'
   // extract the quoted text and inject it as explicit body so parseInstructions
   // doesn't get confused by the quotes.
   let processedBody = body;
@@ -5777,7 +5738,7 @@ async function handleInboundMessage(body, replyFn) {
       // so follow-up messages ("delete all except 7") can resolve the numbers
       if (threadSummary && threadSummary !== "No active threads.") {
         // Store thread index in chat history so follow-up messages can resolve numbers
-        // Format: [Thread index: 1=Jordan, 2=Sarah, 3=John, ...]
+        // Format: [Thread index: 1=Marco, 2=Sarah, 3=John, ...]
         addChatHistory("livia", `[TI:${serialiseThreadIndex()}]`);
         addLog(`📋 Stored thread index: ${serialiseThreadIndex()}`, "info");
       }
@@ -6117,8 +6078,8 @@ app.get("/auth/callback", async (req, res) => {
     ? new google.auth.OAuth2(GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, GOOGLE_REDIRECT_URI)
     : isCalendar ? calendarOAuth2Client : oauth2Client;
   const label  = isContacts ? "Contacts (Owner)" : isCalendar ? "Calendar (Owner)" : "Gmail (Livia)";
-  const envVar   = isContacts ? "GOOGLE_CONTACTS_REFRESH_TOKEN" : isCalendar ? "GOOGLE_CALENDAR_REFRESH_TOKEN" : "GOOGLE_REFRESH_TOKEN";
-  const setupKey = isContacts ? "contactsRefreshToken" : isCalendar ? "calendarRefreshToken" : "gmailRefreshToken";
+  const envVar = isContacts ? "GOOGLE_CONTACTS_REFRESH_TOKEN" : isCalendar ? "GOOGLE_CALENDAR_REFRESH_TOKEN" : "GOOGLE_REFRESH_TOKEN";
+  const settingsKey = isContacts ? "googleContactsRefreshToken" : isCalendar ? "googleCalendarRefreshToken" : "googleRefreshToken";
   try {
     const { tokens } = await client.getToken(req.query.code);
     client.setCredentials(tokens);
@@ -6127,13 +6088,14 @@ app.get("/auth/callback", async (req, res) => {
       contactsOAuth2Client = client;
     }
     if (!isCalendar && !isContacts) config.isAuthorized = true;
-    addLog(`✅ ${label} OAuth authorized!`, "success");
+    addLog(`✅ ${label} connected!`, "success");
     if (tokens.refresh_token) {
-      // Persist the refresh token so it survives restarts — no manual copy-paste needed.
-      saveSetup({ [setupKey]: tokens.refresh_token });
-      addLog(`🔑 ${label} refresh token saved to setup.json (${setupKey})`, "success");
+      // BYOK: persist the deployer's own refresh token so the connection
+      // survives restarts — no manual copy-into-env-vars step required.
+      saveSettings({ [settingsKey]: tokens.refresh_token });
+      addLog(`🔑 ${label} refresh token saved — connection will persist across restarts.`, "success");
     }
-    res.send(`<html><body style="font-family:monospace;padding:40px;background:#1a1714;color:#f5f0e8;"><h2 style="color:#b8965a">✅ ${label} connected!</h2>${tokens.refresh_token ? `<p>The refresh token was saved automatically. You can close this tab and continue setup.</p>` : "<p>Already connected — token already stored.</p>"}<p><a href="/setup" style="color:#b8965a">← Back to setup</a></p></body></html>`);
+    res.send(`<html><body style="font-family:monospace;padding:40px;background:#1a1714;color:#f5f0e8;"><h2 style="color:#b8965a">✅ ${label} connected</h2><p>${tokens.refresh_token ? "Saved — you're all set." : "Already connected."} You can close this tab.</p><p><a href="/" style="color:#b8965a">← Back to the dashboard</a></p></body></html>`);
   } catch (e) {
     console.error(`[AUTH ERROR - ${label}]`, e.message);
     res.status(500).send(`<html><body style="font-family:monospace;padding:40px;background:#1a1714;color:#f5f0e8;"><p style="color:#e07070">${label} authorization failed. Check the server logs for details.</p><p><a href="/" style="color:#b8965a">← Back</a></p></body></html>`);
@@ -6141,36 +6103,72 @@ app.get("/auth/callback", async (req, res) => {
 });
 
 // ─── API routes ───────────────────────────────────────────────────────────────
-app.get("/api/auth/verify", authLimiter, (req, res) => {
-  if (!DASHBOARD_PASSWORD) return res.json({ ok: true, passwordRequired: false });
-  const token = (req.headers["authorization"] || "").replace("Bearer ", "");
-  res.json({ ok: safeCompare(token, DASHBOARD_PASSWORD), passwordRequired: true });
+// ── Sign in with GitHub ───────────────────────────────────────────────────────
+const pendingGithubStates = new Map();
+app.get("/auth/github/login", authLimiter, (req, res) => {
+  if (!githubLoginConfigured()) return res.status(400).send(loginErrPage("GitHub login isn't configured yet. Set it up in Setup → Security."));
+  const state = crypto.randomBytes(16).toString("hex");
+  pendingGithubStates.set(state, Date.now() + 10 * 60 * 1000);
+  const redirectUri = `${baseUrl(req)}/auth/github/callback`;
+  const url = `https://github.com/login/oauth/authorize?client_id=${encodeURIComponent(cfg("githubClientId", "GITHUB_CLIENT_ID"))}&redirect_uri=${encodeURIComponent(redirectUri)}&scope=read:user&state=${state}&allow_signup=false`;
+  res.redirect(url);
 });
-app.get("/api/status",  apiLimiter, requireAuth, (req, res) => res.json({ isPolling, isAuthorized: config.isAuthorized, pollIntervalMinutes: config.pollIntervalMinutes, hasApiKey: !!config.anthropicKey, processedCount: processedMessageIds.size, activeThreads: Object.keys(activeThreads).length, dataDir: DATA_DIR }));
-app.get("/api/logs",    apiLimiter, requireAuth, (req, res) => res.json(logs));
-app.get("/api/threads", apiLimiter, requireAuth, (req, res) => res.json(activeThreads));
-
-// Delete a single thread
-app.delete("/api/threads/:threadId", apiLimiter, requireAuth, (req, res) => {
-  const id = decodeURIComponent(req.params.threadId);
-  if (!activeThreads[id]) return res.status(404).json({ error: "Thread not found" });
-  delete activeThreads[id];
-  saveThreads();
-  addLog(`🗑️ Thread deleted manually: ${id}`);
+app.get("/auth/github/callback", authLimiter, async (req, res) => {
+  const { code, state } = req.query;
+  const exp = pendingGithubStates.get(state);
+  if (!state || !exp || Date.now() > exp) return res.status(403).send(loginErrPage("Invalid or expired sign-in request. Please try again."));
+  pendingGithubStates.delete(state);
+  try {
+    const tokenRes = await fetch("https://github.com/login/oauth/access_token", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "Accept": "application/json" },
+      body: JSON.stringify({ client_id: cfg("githubClientId", "GITHUB_CLIENT_ID"), client_secret: cfg("githubClientSecret", "GITHUB_CLIENT_SECRET"), code, redirect_uri: `${baseUrl(req)}/auth/github/callback` }),
+    });
+    const tokenData = await tokenRes.json();
+    if (!tokenData.access_token) return res.status(401).send(loginErrPage("GitHub did not return an access token."));
+    const userRes = await fetch("https://api.github.com/user", { headers: { Authorization: `Bearer ${tokenData.access_token}`, "User-Agent": "livia-ea", Accept: "application/vnd.github+json" } });
+    const ghUser = await userRes.json();
+    const login = String(ghUser.login || "").toLowerCase();
+    if (!login) return res.status(401).send(loginErrPage("Could not read your GitHub profile."));
+    const allowed = cfg("githubAllowedUsers", "GITHUB_ALLOWED_USERS").split(",").map(s => s.trim().toLowerCase()).filter(Boolean);
+    if (!allowed.length) return res.status(403).send(loginErrPage("No GitHub users are allowed yet. Add your GitHub username in Setup → Security."));
+    if (!allowed.includes(login)) {
+      addLog(`🚫 GitHub login denied for @${login} (not in allowlist)`, "warning");
+      return res.status(403).send(loginErrPage(`@${login} is not authorized for this instance.`));
+    }
+    const token = signSession({ login, exp: Date.now() + 30 * 24 * 60 * 60 * 1000 });
+    const secure = baseUrl(req).startsWith("https") ? " Secure;" : "";
+    res.setHeader("Set-Cookie", `livia_session=${encodeURIComponent(token)}; HttpOnly; Path=/; SameSite=Lax;${secure} Max-Age=${30 * 24 * 60 * 60}`);
+    addLog(`✅ Signed in via GitHub: @${login}`, "success");
+    res.redirect("/");
+  } catch (e) {
+    console.error("[GITHUB AUTH]", e.message);
+    res.status(500).send(loginErrPage("GitHub sign-in failed. Check the server logs."));
+  }
+});
+app.post("/api/logout", (req, res) => {
+  res.setHeader("Set-Cookie", "livia_session=; HttpOnly; Path=/; SameSite=Lax; Max-Age=0");
   res.json({ ok: true });
 });
 
-// Bulk-delete completed/cancelled threads
+app.get("/api/auth/verify", authLimiter, (req, res) => {
+  const githubOn = githubLoginConfigured();
+  // Setup mode — nothing secures the instance yet; let the owner straight in.
+  if (!DASHBOARD_PASSWORD && !githubOn) return res.json({ ok: true, passwordRequired: false, githubLogin: false, setupMode: true });
+  if (sessionUser(req)) return res.json({ ok: true, passwordRequired: !!DASHBOARD_PASSWORD, githubLogin: githubOn });
+  const token = (req.headers["authorization"] || "").replace(/^Bearer\s+/i, "").trim();
+  const ok = DASHBOARD_PASSWORD ? safeCompare(token, DASHBOARD_PASSWORD) : false;
+  res.json({ ok, passwordRequired: !!DASHBOARD_PASSWORD, githubLogin: githubOn });
+});
+app.get("/api/status",  apiLimiter, requireAuth, (req, res) => res.json({ isPolling, isAuthorized: config.isAuthorized, pollIntervalMinutes: config.pollIntervalMinutes, hasApiKey: !!config.anthropicKey, processedCount: processedMessageIds.size, activeThreads: Object.keys(activeThreads).length, dataDir: DATA_DIR }));
+
 // ─── Test harness endpoint (Agent Etna) ─────────────────────────────────────
-// Ported from livia_ea (2026-08-06) before that repo's retirement — the
-// endpoint and the Etna-generated guardrails were shipped there via Agent
-// Etna simulations and never followed the fork. The assistant's normal
-// interface is Telegram + email — no chat endpoint — so a developmental
-// simulator can't drive it. This exposes the brain (persona + askClaude)
-// over a simple {message} -> {reply} call SO IT CAN BE TESTED, but ONLY when
-// ETNA_AGENT_CHAT=1 is set (Agent Etna injects this in its sandbox). In
-// normal production the flag is unset and this 404s, so it never widens the
-// real attack surface or burns the key.
+// Livia's normal interface is Telegram + email — it has no chat endpoint, so a
+// developmental simulator can't drive it. This exposes Livia's brain (its
+// persona + askClaude) over a simple {message} -> {reply} call SO IT CAN BE
+// TESTED, but ONLY when ETNA_AGENT_CHAT=1 is set (Agent Etna injects this in
+// its sandbox). In normal production the flag is unset and this 404s, so it
+// never widens Livia's real attack surface or burns the key.
 app.post("/api/chat", apiLimiter, async (req, res) => {
   const _etnaGuard = require("./etna-guardrails");
   {
@@ -6187,16 +6185,30 @@ app.post("/api/chat", apiLimiter, async (req, res) => {
   if (process.env.ETNA_AGENT_CHAT !== "1") return res.status(404).json({ error: "Not found" });
   const message = req.body && (req.body.message || req.body.text);
   if (!message || typeof message !== "string") return res.status(400).json({ error: "message required" });
-  if (!config.anthropicKey) return res.status(503).json({ error: "AI unavailable — no LLM key configured." });
+  if (!config.anthropicKey) return res.status(503).json({ error: "No Anthropic key configured" });
   try {
     const persona = String(config.instructions || "");
-    const prompt = `${persona}\n\nYou are ${LIVIA_NAME}, ${OWNER_NAME || "the owner"}'s executive assistant. Reply to the message below as you naturally would — concise and in your own voice.\n\nMessage:\n${wrapUntrusted(message.slice(0, 4000))}\n\nReply:`;
+    const prompt = `${persona}\n\nYou are Livia, ${OWNER_NAME || "the owner"}'s executive assistant. Reply to the message below as you naturally would — concise and in your own voice.\n\nMessage:\n${wrapUntrusted(message.slice(0, 4000))}\n\nReply:`;
     const reply = await askClaude(prompt, 600);
     res.json({ reply: reply || "" });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
 });
+app.get("/api/logs",    apiLimiter, requireAuth, (req, res) => res.json(logs));
+app.get("/api/threads", apiLimiter, requireAuth, (req, res) => res.json(activeThreads));
+
+// Delete a single thread
+app.delete("/api/threads/:threadId", apiLimiter, requireAuth, (req, res) => {
+  const id = decodeURIComponent(req.params.threadId);
+  if (!activeThreads[id]) return res.status(404).json({ error: "Thread not found" });
+  delete activeThreads[id];
+  saveThreads();
+  addLog(`🗑️ Thread deleted manually: ${id}`);
+  res.json({ ok: true });
+});
+
+// Bulk-delete completed/cancelled threads
 app.post("/api/threads/clear-done", apiLimiter, requireAuth, (req, res) => {
   let removed = 0;
   for (const [id, t] of Object.entries(activeThreads)) {
@@ -6221,6 +6233,7 @@ app.post("/api/config", apiLimiter, requireAuth, (req, res) => {
   if (anthropicKey !== undefined) {
     if (typeof anthropicKey !== "string" || anthropicKey.length > 200) return res.status(400).json({ error: "Invalid anthropicKey" });
     config.anthropicKey = anthropicKey; _anthropic = null;
+    saveSettings({ anthropicKey });   // BYOK: persist so it survives restarts
   }
   if (pollIntervalMinutes !== undefined) {
     const interval = parseInt(pollIntervalMinutes, 10);
@@ -6243,7 +6256,65 @@ app.post("/api/config", apiLimiter, requireAuth, (req, res) => {
   addLog("⚙️ Configuration updated", "success");
   res.json({ ok: true });
 });
-app.get("/api/config", apiLimiter, requireAuth, (req, res) => res.json({ isAuthorized: config.isAuthorized, hasApiKey: !!config.anthropicKey, pollIntervalMinutes: config.pollIntervalMinutes, liviaEmail: LIVIA_EMAIL, ownerEmail: OWNER_DEFAULT, ownerName: OWNER_NAME, orgName: ORG_NAME, liviaName: LIVIA_NAME, timezone: TIMEZONE, instructions: config.instructions, vdrLink: config.vdrLink, vdrInfo: config.vdrInfo }));
+app.get("/api/config", apiLimiter, requireAuth, (req, res) => res.json({
+  isAuthorized: config.isAuthorized, hasApiKey: !!config.anthropicKey,
+  pollIntervalMinutes: config.pollIntervalMinutes, liviaEmail: LIVIA_EMAIL, ownerEmail: OWNER_DEFAULT,
+  instructions: config.instructions, vdrLink: config.vdrLink, vdrInfo: config.vdrInfo,
+  setup: setupStatus(),
+}));
+
+// ── BYOK setup wizard: the deployer's own keys/identity, persisted to disk ─────
+// Non-secret status so the UI can show progress and prefill (never returns secrets).
+function setupStatus() {
+  return {
+    ownerName: settings.ownerName || (OWNER_NAME !== "the principal" ? OWNER_NAME : ""),
+    ownerEmail: settings.ownerEmail || OWNER_DEFAULT,
+    ownerEmails: settings.ownerEmails || OWNER_EMAILS.join(","),
+    ownerPhone: settings.ownerPhone || OWNER_PHONE,
+    liviaName: settings.liviaName || LIVIA_NAME,
+    liviaEmail: settings.liviaEmail || LIVIA_EMAIL,
+    orgName: settings.orgName || ORG_NAME,
+    googleClientId: cfg("googleClientId", "GOOGLE_CLIENT_ID"),
+    googleRedirectUri: GOOGLE_REDIRECT_URI,
+    githubClientId: cfg("githubClientId", "GITHUB_CLIENT_ID"),
+    githubAllowedUsers: cfg("githubAllowedUsers", "GITHUB_ALLOWED_USERS"),
+    hasAnthropicKey: !!config.anthropicKey,
+    hasGoogleApp: !!(cfg("googleClientId", "GOOGLE_CLIENT_ID") && cfg("googleClientSecret", "GOOGLE_CLIENT_SECRET")),
+    gmailConnected: !!cfg("googleRefreshToken", "GOOGLE_REFRESH_TOKEN"),
+    calendarConnected: !!cfg("googleCalendarRefreshToken", "GOOGLE_CALENDAR_REFRESH_TOKEN"),
+    contactsConnected: !!cfg("googleContactsRefreshToken", "GOOGLE_CONTACTS_REFRESH_TOKEN"),
+    telegramConfigured: !!TELEGRAM_TOKEN,
+    githubLoginConfigured: githubLoginConfigured(),
+    secured: !!(DASHBOARD_PASSWORD || githubLoginConfigured()),
+  };
+}
+const SETUP_FIELDS = {
+  ownerName: 200, ownerEmail: 200, ownerEmails: 1000, ownerPhone: 40, ownerCalendarEmail: 200,
+  liviaName: 120, liviaEmail: 200, orgName: 200,
+  googleClientId: 400, googleClientSecret: 400, googleRedirectUri: 400,
+  telegramBotToken: 200, telegramChatId: 80,
+  githubClientId: 200, githubClientSecret: 200, githubAllowedUsers: 1000,
+  dashboardPassword: 200,
+};
+app.post("/api/setup", apiLimiter, requireAuth, (req, res) => {
+  const patch = {};
+  for (const [key, max] of Object.entries(SETUP_FIELDS)) {
+    const val = req.body[key];
+    if (val === undefined) continue;
+    if (typeof val !== "string" || val.length > max) return res.status(400).json({ error: `Invalid ${key}` });
+    patch[key] = val.trim();
+  }
+  if (!Object.keys(patch).length) return res.status(400).json({ error: "No valid fields supplied" });
+  saveSettings(patch);
+  // Apply live what we safely can; the rest take effect on restart.
+  if (patch.dashboardPassword !== undefined) DASHBOARD_PASSWORD = patch.dashboardPassword;
+  if (patch.telegramBotToken !== undefined) { TELEGRAM_TOKEN = patch.telegramBotToken; TELEGRAM_ENABLED = !!TELEGRAM_TOKEN; }
+  if (patch.telegramChatId !== undefined) TELEGRAM_CHAT_ID = patch.telegramChatId;
+  const restartKeys = ["ownerName","ownerEmail","ownerEmails","ownerPhone","ownerCalendarEmail","liviaName","liviaEmail","orgName","googleClientId","googleClientSecret","googleRedirectUri","githubClientId","githubClientSecret"];
+  const needsRestart = restartKeys.some(k => k in patch);
+  addLog("⚙️ Setup saved", "success");
+  res.json({ ok: true, needsRestart, setup: setupStatus() });
+});
 
 // ── Contacts: view and manually add/correct ─────────────────────────────────
 app.get("/api/contacts", apiLimiter, requireAuth, (req, res) => res.json(contacts));
@@ -6369,117 +6440,6 @@ app.delete("/api/profiles/:email", apiLimiter, requireAuth, (req, res) => {
 // ── Persistent Rules ──────────────────────────────────────────────────────────
 // ── Expenses ─────────────────────────────────────────────────────────────────
 app.get("/api/expenses", apiLimiter, requireAuth, (req, res) => res.json(expenses));
-
-// ── Trip expense reports ─────────────────────────────────────────────────────
-// The register above records what arrived. These endpoints turn that spend into
-// a policy-checked, approvable claim. Namespaced under /api/expense-reports so
-// the register's own routes are untouched.
-
-/** Resolve a report by id, or answer 404. */
-function _findReport(req, res) {
-  const report = expenseReports.find(r => r.id === req.params.id);
-  if (!report) { res.status(404).json({ error: "Expense report not found" }); return null; }
-  return report;
-}
-
-/** Run an engine call, persist on success, and map thrown errors to 400. */
-function _mutateReport(res, report, fn) {
-  try {
-    const result = fn(report);
-    saveExpenseReports();
-    return res.json(result);
-  } catch (e) {
-    return res.status(400).json({ error: e.message });
-  }
-}
-
-app.get("/api/expense-reports", apiLimiter, requireAuth, (req, res) => {
-  res.json(expenseReports.map(r => ({ ...expenseReportEngine.summarise(r), status: r.status })));
-});
-
-app.post("/api/expense-reports", apiLimiter, requireAuth, (req, res) => {
-  try {
-    const { purpose, destination, startDate, endDate, traveler, policy } = req.body || {};
-    const report = expenseReportEngine.createReport(
-      { purpose, destination, startDate, endDate, traveler: traveler || OWNER_NAME },
-      policy || {},
-    );
-    expenseReports.push(report);
-    saveExpenseReports();
-    addLog(`\u{1F9FE} Expense report opened: ${report.purpose}`, "info");
-    res.json({ ok: true, report });
-  } catch (e) {
-    res.status(400).json({ error: e.message });
-  }
-});
-
-app.get("/api/expense-reports/:id", apiLimiter, requireAuth, (req, res) => {
-  const report = _findReport(req, res);
-  if (!report) return;
-  res.json({
-    ok: true,
-    report,
-    summary: expenseReportEngine.summarise(report),
-    policy: expenseReportEngine.checkPolicy(report),
-  });
-});
-
-app.post("/api/expense-reports/:id/items", apiLimiter, requireAuth, (req, res) => {
-  const report = _findReport(req, res);
-  if (!report) return;
-  const b = req.body || {};
-  _mutateReport(res, report, (r) => {
-    const line = b.perDiem
-      ? expenseReportEngine.addPerDiem(r, { days: Number(b.days), kind: b.kind || "meals", date: b.date })
-      : expenseReportEngine.addLineItem(r, b);
-    return { ok: true, lineItem: line, total: expenseReportEngine.totalAmount(r) };
-  });
-});
-
-/** Claim an expense already captured in the register, without re-keying it. */
-app.post("/api/expense-reports/:id/claim/:expenseId", apiLimiter, requireAuth, (req, res) => {
-  const report = _findReport(req, res);
-  if (!report) return;
-  const captured = expenses.find(e => e.id === req.params.expenseId);
-  if (!captured) return res.status(404).json({ error: "Expense not found in the register" });
-
-  _mutateReport(res, report, (r) => {
-    const line = expenseReportEngine.fromCapturedExpense(r, captured);
-    addLog(`\u{1F9FE} Claimed ${captured.vendor} on report ${r.id}`, "info");
-    return { ok: true, lineItem: line, total: expenseReportEngine.totalAmount(r) };
-  });
-});
-
-app.post("/api/expense-reports/:id/submit", apiLimiter, requireAuth, (req, res) => {
-  const report = _findReport(req, res);
-  if (!report) return;
-  try {
-    const result = expenseReportEngine.submit(report, { submittedBy: (req.body || {}).submittedBy || OWNER_NAME });
-    saveExpenseReports();
-    res.status(result.ok ? 200 : 409).json(result);
-  } catch (e) {
-    res.status(400).json({ error: e.message });
-  }
-});
-
-app.post("/api/expense-reports/:id/approve", apiLimiter, requireAuth, (req, res) => {
-  const report = _findReport(req, res);
-  if (!report) return;
-  const b = req.body || {};
-  _mutateReport(res, report, r => expenseReportEngine.approve(r, { approvedBy: b.approvedBy, notes: b.notes }));
-});
-
-app.post("/api/expense-reports/:id/reject", apiLimiter, requireAuth, (req, res) => {
-  const report = _findReport(req, res);
-  if (!report) return;
-  const b = req.body || {};
-  _mutateReport(res, report, r => expenseReportEngine.reject(r, { rejectedBy: b.rejectedBy, reason: b.reason }));
-});
-
-// ── Agent card ───────────────────────────────────────────────────────────────
-// Public and unauthenticated: it is an identity document, and it carries no
-// data beyond what Livia already advertises about herself.
-app.get("/agent-card", (req, res) => res.json(AGENT_CARD));
 
 // Manual expense entry
 app.post("/api/expenses", apiLimiter, requireAuth, (req, res) => {
@@ -6711,7 +6671,7 @@ let contactsOAuth2Client = null;
 function getContactsOAuth() {
   if (contactsOAuth2Client) return contactsOAuth2Client;
   // Must use a dedicated contacts token — calendar token does NOT have contacts scope
-  const contactsToken = setupVal("contactsRefreshToken", "GOOGLE_CONTACTS_REFRESH_TOKEN");
+  const contactsToken = cfg("googleContactsRefreshToken", "GOOGLE_CONTACTS_REFRESH_TOKEN");
   if (!contactsToken) return null;
   contactsOAuth2Client = new google.auth.OAuth2(
     GOOGLE_CLIENT_ID,
@@ -6888,88 +6848,10 @@ app.delete("/api/campaigns/:id", apiLimiter, requireAuth, (req, res) => {
   res.json({ ok: true });
 });
 
-// ─── Onboarding / setup wizard ────────────────────────────────────────────────
-// Resolved-value readiness check, shared by validateSetup() and /api/setup/status.
-function computeSetupStatus() {
-  const checks = {
-    ownerName:          !!OWNER_NAME && OWNER_NAME !== "the principal",
-    ownerEmails:        OWNER_EMAILS.length > 0,
-    liviaEmail:         !!LIVIA_EMAIL,
-    anthropicKey:       !!config.anthropicKey,
-    googleClientId:     !!GOOGLE_CLIENT_ID,
-    googleClientSecret: !!GOOGLE_CLIENT_SECRET,
-    gmailRefreshToken:  !!GMAIL_REFRESH_TOKEN,
-  };
-  const missing = Object.keys(checks).filter(k => !checks[k]);
-  return { ready: missing.length === 0, missing, checks };
-}
-
-// Field schema for the wizard. `secret` values are write-only — never returned.
-const SETUP_FIELDS = [
-  { key: "ownerName",          required: true,  secret: false },
-  { key: "orgName",            required: false, secret: false },
-  { key: "ownerEmail",         required: true,  secret: false },
-  { key: "ownerEmails",        required: false, secret: false },
-  { key: "ownerPhone",         required: false, secret: false },
-  { key: "timezone",           required: false, secret: false },
-  { key: "liviaName",          required: false, secret: false },
-  { key: "liviaEmail",         required: true,  secret: false },
-  { key: "anthropicKey",       required: true,  secret: true  },
-  { key: "googleClientId",     required: true,  secret: false },
-  { key: "googleClientSecret", required: true,  secret: true  },
-  { key: "googleRedirectUri",  required: false, secret: false },
-  { key: "dashboardPassword",  required: false, secret: true  },
-];
-
-// Allow setup writes while unconfigured (no password yet); once ready, require auth.
-function setupGuard(req, res, next) {
-  return SETUP_MODE ? next() : requireAuth(req, res, next);
-}
-
-// Status — booleans only, never secret values.
-app.get("/api/setup/status", apiLimiter, (req, res) => {
-  const status = computeSetupStatus();
-  const fields = {};
-  for (const f of SETUP_FIELDS) fields[f.key] = !!(SETUP[f.key] && String(SETUP[f.key]).trim());
-  res.json({
-    setupMode: SETUP_MODE,
-    ready: status.ready,
-    missing: status.missing,
-    fields,
-    connected: { gmail: !!GMAIL_REFRESH_TOKEN, calendar: !!CALENDAR_REFRESH_TOKEN || !!GMAIL_REFRESH_TOKEN },
-    redirectUri: GOOGLE_REDIRECT_URI,
-  });
-});
-
-// Persist wizard answers to setup.json. A restart applies the identity fields.
-app.post("/api/setup", apiLimiter, setupGuard, (req, res) => {
-  const body = req.body || {};
-  const updates = {};
-  for (const f of SETUP_FIELDS) {
-    if (body[f.key] === undefined) continue;
-    const v = body[f.key];
-    if (typeof v !== "string" || v.length > 4000) return res.status(400).json({ error: `Invalid value for ${f.key}` });
-    updates[f.key] = v.trim();
-  }
-  if (!Object.keys(updates).length) return res.status(400).json({ error: "No recognised fields provided" });
-  saveSetup(updates);
-  addLog("⚙️ Setup saved via wizard — restart to apply identity changes", "success");
-  res.json({ ok: true, restartRequired: true, saved: Object.keys(updates) });
-});
-
-// Serve the wizard UI explicitly (so it's reachable even after setup completes).
-app.get("/setup", (req, res) => {
-  const p = path.join(PUBLIC_DIR, "setup.html");
-  if (!fs.existsSync(p)) return res.status(500).send("setup.html not found.");
-  res.sendFile(p);
-});
-
 app.get("*", (req, res) => {
-  // While unconfigured, route everything to the setup wizard.
-  const file = SETUP_MODE ? "setup.html" : "index.html";
-  const p = path.join(PUBLIC_DIR, file);
-  if (!fs.existsSync(p)) return res.status(500).send(`${file} not found.`);
-  res.sendFile(p);
+  const indexPath = path.join(PUBLIC_DIR, "index.html");
+  if (!fs.existsSync(indexPath)) return res.status(500).send("index.html not found.");
+  res.sendFile(indexPath);
 });
 
 // ─── Global error handler — prevents stack traces leaking to clients ──────────
@@ -6978,28 +6860,62 @@ app.use((err, req, res, next) => {
   res.status(err.status || 500).json({ error: "An unexpected error occurred." });
 });
 
-// ─── Setup validation ─────────────────────────────────────────────────────────
-// Instead of failing fast, enter SETUP_MODE when required configuration is
-// missing so the /setup wizard is reachable on a freshly-cloned instance.
-(function validateSetup() {
-  const status = computeSetupStatus();
-  if (!status.ready) {
-    SETUP_MODE = true;
-    console.warn("\n⚙️  SETUP MODE — configuration incomplete.");
-    console.warn(`   Missing: ${status.missing.join(", ")}`);
-    console.warn(`   Finish setup at  http://localhost:${process.env.PORT || 3000}/setup\n`);
+// ─── Environment validation ───────────────────────────────────────────────────
+// Fail fast with a clear message rather than crashing mid-task
+(function validateEnv() {
+  const required = [
+    { key: "ANTHROPIC_API_KEY",      hint: "Your Anthropic API key — get it from console.anthropic.com" },
+    { key: "GOOGLE_CLIENT_ID",       hint: "Google OAuth client ID — from Google Cloud Console" },
+    { key: "GOOGLE_CLIENT_SECRET",   hint: "Google OAuth client secret — from Google Cloud Console" },
+    { key: "GOOGLE_REFRESH_TOKEN",   hint: "Google refresh token — run /auth/login once to obtain it" },
+    { key: "OWNER_EMAILS",           hint: "Comma-separated list of the owner's email addresses (e.g. owner@example.com,owner@company.com)" },
+    { key: "OWNER_EMAIL",            hint: "The owner's primary email address — used as the default From/To" },
+    { key: "OWNER_NAME",             hint: "The owner's full name (e.g. John Smith) — used in greetings, signatures, and prompts" },
+    { key: "LIVIA_EMAIL",            hint: "Livia's Gmail address — the account she sends emails from" },
+  ];
+  const optional = [
+    { key: "DASHBOARD_PASSWORD",     hint: "Dashboard password — set this or anyone can access the UI" },
+    { key: "ALLOWED_ORIGINS",        hint: "Comma-separated allowed origins for CORS (e.g. https://your-app.onrender.com)" },
+    { key: "DEPLOY_ID",              hint: "Increment this when you want a clean state wipe on redeploy" },
+    { key: "OWNER_CALENDAR_EMAIL",   hint: "Owner's Google Calendar email — defaults to OWNER_EMAIL if not set" },
+    { key: "OWNER_PHONE",            hint: "Owner's phone number with country code (e.g. +1234567890)" },
+    { key: "LIVIA_NAME",             hint: "The assistant's display name — defaults to Livia Drusilla" },
+    { key: "GOOGLE_CALENDAR_REFRESH_TOKEN", hint: "Owner's Google refresh token for Calendar — visit /auth/calendar-login to obtain it" },
+    { key: "GOOGLE_CONTACTS_REFRESH_TOKEN", hint: "Google Contacts refresh token — visit /auth/contacts-login to sync CRM to iPhone" },
+    { key: "TELEGRAM_BOT_TOKEN",        hint: "Telegram bot token from @BotFather — for two-way messaging with the owner" },
+    { key: "TELEGRAM_CHAT_ID",         hint: "Owner's Telegram chat ID — auto-detected on first message, save it here for persistence" },
+  ];
+  // BYOK: persisted settings (from the in-app Setup wizard) satisfy these too —
+  // not just env vars — so the app boots even when nothing is configured yet.
+  const resolved = {
+    ANTHROPIC_API_KEY: config.anthropicKey,
+    GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, GOOGLE_REFRESH_TOKEN,
+    OWNER_EMAILS: OWNER_EMAILS.join(","),
+    OWNER_EMAIL: OWNER_DEFAULT,
+    OWNER_NAME: (OWNER_NAME && OWNER_NAME !== "the principal") ? OWNER_NAME : "",
+    LIVIA_EMAIL,
+  };
+  const missing = required.filter(v => !resolved[v.key]);
+  if (missing.length) {
+    console.warn("\n⚙️  SETUP INCOMPLETE — finish in the dashboard Setup tab (or set env vars):");
+    missing.forEach(v => console.warn(`   • ${v.key} — ${v.hint}`));
+    console.warn("   Running in setup mode — secure your instance with a password or GitHub login.\n");
+  } else {
+    console.log("✅ Configuration complete.");
   }
-  if (!DASHBOARD_PASSWORD) {
-    console.warn("⚠️  DASHBOARD_PASSWORD is not set — the dashboard API stays locked until you set one (wizard or env).");
+  const missingOptional = optional.filter(v => !process.env[v.key]);
+  if (missingOptional.length) {
+    console.warn("\n⚠️  Optional environment variables not set:");
+    missingOptional.forEach(v => console.warn(`   ${v.key} — ${v.hint}`));
+    console.warn("");
   }
 })();
 
 // ─── Start ────────────────────────────────────────────────────────────────────
 const PORT = process.env.PORT || 3000;
-
 app.listen(PORT, () => {
   addLog(`🌿 Livia v6 started on port ${PORT}`, "success");
-  if (!DASHBOARD_PASSWORD) addLog("🚨 SECURITY: DASHBOARD_PASSWORD is not set — all API endpoints are blocked until you set it", "warning");
+  if (!DASHBOARD_PASSWORD && !githubLoginConfigured()) addLog("🔓 SETUP MODE: no password or GitHub login set — the dashboard is open. Secure it in Setup → Security.", "warning");
   addLog(freshDeploy ? `🔄 Fresh deploy — stale state wiped` : `♻️ Same deploy — state preserved`, freshDeploy ? "warning" : "info");
   addLog(`💾 Data directory: ${DATA_DIR}`, "info");
   if (persistentRules.length) addLog(`🧠 ${persistentRules.length} persistent rule(s) loaded`, "info");
@@ -7037,6 +6953,6 @@ app.listen(PORT, () => {
     }
   } else {
     if (!config.isAuthorized) addLog("⚠️ Google not authorized — visit /auth/login", "warning");
-    if (!config.anthropicKey) addLog("⚠️ LLM API key missing — set OPENROUTER_API_KEY", "warning");
+    if (!config.anthropicKey) addLog("⚠️ Anthropic API key missing", "warning");
   }
 });
