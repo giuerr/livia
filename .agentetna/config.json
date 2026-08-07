@@ -2,7 +2,8 @@
   "id": "livia",
   "name": "livia",
   "channels": [
-    "web"
+    "web",
+    "telegram"
   ],
   "mode": "simulator",
   "env": {
@@ -10,11 +11,14 @@
     "password": "LIVIA_PASSWORD"
   },
   "userId": "github:266114454",
+  "directUrl": "https://tabularum-livia.onrender.com",
   "github": {
     "repo": "giuerr/livia",
     "branch": "main",
     "files": [
-      "server.js"
+      "server.js",
+      "instructions.txt",
+      ".env.example"
     ]
   },
   "calibration": {
